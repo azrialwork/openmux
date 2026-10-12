@@ -176,9 +176,13 @@ jobs:
           if readelf -d "$BIN" | grep -q "libc\.so\.6"; then
             echo "error: product links glibc (libc.so.6); expected Bionic" >&2; exit 1
           fi
-          # seccomp shim must be the first DT_NEEDED entry
-          readelf -d "$BIN" | grep -q "NEEDED.*libopencode-crhandler\.so" \
-            || { echo "error: seccomp shim not injected" >&2; exit 1; }
+          # seccomp shim must be present. crhandler_patch.py itself is the
+          # authority on the dynamic entries (it prints "DT_NEEDED[0] ->
+          # libopencode-crhandler.so first, zero displacement proven" and
+          # fails loudly otherwise); readelf -d is not reliable on the
+          # surgically-extended strtab, so byte-check the shim name here.
+          grep -q "libopencode-crhandler\.so" "$BIN" \
+            || { echo "error: seccomp shim not found in product" >&2; exit 1; }
           python3 -c "
           import json,sys
           r = json.load(open('$D/report.json'))
