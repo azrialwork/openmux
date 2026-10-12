@@ -76,15 +76,21 @@ jobs:
           cp -r transplant-src/tools build/tools
           ls build/tools/transplant
 
-      - name: Build Bionic libopentui.so (TUI library)
+      - name: Stage Bionic libopentui.so (TUI library)
         if: steps.skip.outputs.exists == 'false'
         working-directory: build
         run: |
-          # Required: without it the TUI swap is skipped and the shipped
-          # binary cannot render. Fail loudly instead of shipping degraded.
-          bash tools/transplant/build-libopentui.sh
-          test -f artifacts/transplant/opentui-bionic/libopentui.so
-          echo "bionic libopentui.so ready"
+          # The Bionic libopentui.so cannot be built on x86 CI --
+          # build-libopentui.sh needs the maintainer's on-device Termux
+          # environment. Instead we use the vendored prebuilt (see
+          # vendor/README.md for provenance): it passes swap_tui.py's own
+          # gates (not glibc-linked, FFI guard v2 present). transplant.py
+          # picks it up from this exact path and equal-length-swaps it into
+          # the binary; without it the TUI cannot render on Bionic.
+          mkdir -p artifacts/transplant/opentui-bionic
+          cp -p ../vendor/libopentui-bionic.so \
+            artifacts/transplant/opentui-bionic/libopentui.so
+          echo "bionic libopentui.so staged"
 
       - name: Download upstream opencode tarball
         if: steps.skip.outputs.exists == 'false'

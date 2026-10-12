@@ -7,23 +7,23 @@
 
 # tools/
 
-This directory is intentionally almost empty. The transplant toolchain
-(`transplant.py`, `revive_patch.py`, `swap_tui.py`, `build-libopentui.sh`,
-`config/bun-bind.json`, ...) is **fetched at build time** by `build.yml`:
+This directory is intentionally almost empty. Two build inputs are sourced
+outside the repo:
 
-```yaml
-env:
-  TRANSPLANT_REPO: Hope2333/opencode-termux
-  TRANSPLANT_REF: 736540a066a2ef2f6824064982509583b37eb2ab
-```
+1. **Transplant toolchain** -- fetched at build time by `build.yml` via a
+   sparse checkout of `tools/transplant` from `Hope2333/opencode-termux` at
+   the pinned commit in `TRANSPLANT_REF`. The pin is explicit and auditable
+   in one place; bump it deliberately after checking their changelog.
 
-via a sparse checkout of `tools/transplant` at that pinned commit.
+2. **Bionic libopentui.so** -- vendored at `vendor/libopentui-bionic.so`
+   (see `vendor/README.md` for provenance). It cannot be built on x86 CI,
+   so a prebuilt is committed. `build.yml` stages it where `transplant.py`
+   expects it (`artifacts/transplant/opentui-bionic/libopentui.so`).
 
-Why not vendor it:
+Why not vendor the toolchain too:
 
 - The repo stays tiny (the toolchain plus its history is far larger than
   everything else here).
-- The pin is explicit and auditable in one place (`build.yml`).
 - Upstream fixes are picked up by bumping one SHA, not by re-vendoring.
 
 How to bump `TRANSPLANT_REF`:
@@ -34,5 +34,6 @@ How to bump `TRANSPLANT_REF`:
 2. Run `build.yml` manually with the new SHA in a test branch first.
 3. Only then update the pin on `main`.
 
-License note: the toolchain is MIT-licensed (Hope2333/opencode-termux);
-attribution is in README.md and build.yml comments.
+License note: the toolchain and the vendored `.so` are MIT-licensed
+(Hope2333/opencode-termux); attribution is in README.md and build.yml
+comments.
