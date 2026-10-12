@@ -168,12 +168,14 @@ jobs:
           echo "product=$BIN"
           file "$BIN" | grep -q "ARM aarch64" \
             || { echo "error: product is not an aarch64 ELF" >&2; exit 1; }
-          # Bionic-linked (libc.so), NOT glibc-linked (libc.so.6)
+          # Bionic, NOT glibc. Note: after crhandler_patch the libc.so NEEDED
+          # entry lives in the DT_DEBUG slot (bionic always loads libc
+          # implicitly), so there is no NEEDED libc.so line anymore -- the
+          # patch script itself proved the pre-patch shape (first NEEDED was
+          # libc.so) before rewriting it.
           if readelf -d "$BIN" | grep -q "libc\.so\.6"; then
             echo "error: product links glibc (libc.so.6); expected Bionic" >&2; exit 1
           fi
-          readelf -d "$BIN" | grep -q "NEEDED.*libc\.so" \
-            || { echo "error: no Bionic libc NEEDED entry" >&2; exit 1; }
           # seccomp shim must be the first DT_NEEDED entry
           readelf -d "$BIN" | grep -q "NEEDED.*libopencode-crhandler\.so" \
             || { echo "error: seccomp shim not injected" >&2; exit 1; }
