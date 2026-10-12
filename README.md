@@ -51,7 +51,7 @@ opencode-termux/
   install.sh                 # curl|bash entrypoint (POSIX sh, checksum-verified)
   .github/workflows/
     build.yml                # transplant -> package -> GitHub Release
-    watch-upstream.yml       # weekly poll -> trigger build on new upstream
+    watch-upstream.yml       # 12-hour poll -> trigger build on new upstream
   tools/
     README.md                # the transplant toolchain is fetched at build time (pinned)
 ```
