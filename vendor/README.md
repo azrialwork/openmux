@@ -34,6 +34,24 @@ glibc-linked, carries the FFI negative-coordinate guard v2.
 - License: MIT (Hope2333/opencode-termux); built from OpenTUI (MIT) plus
   their patches -- attribution in the repo README
 
+## libopencode-crhandler.so
+
+The upstream seccomp shim. On older Android kernels (e.g. 4.14) the
+seccomp filter kills the binary with SIGSYS ("Bad system call") on blocked
+syscalls (close_range and friends). This 8 KB shim installs a SIGSYS
+handler and interposes `syscall()`/`close_range()` (verified exports);
+`crhandler_patch.py` injects it as the FIRST DT_NEEDED entry of the
+transplanted binary, and the binary finds it via DT_RUNPATH
+`$ORIGIN/../lib/opencode` -- hence the tarball ships it at
+`lib/opencode/libopencode-crhandler.so`.
+
+### Provenance
+
+- Source: same deb as above, shipped by upstream as a separate file at
+  `$PREFIX/lib/opencode/libopencode-crhandler.so` -- copied byte-identical
+- ELF aarch64; NEEDED `libc.so`, `libdl.so` (Bionic)
+- License: MIT (Hope2333/opencode-termux)
+
 ### Refreshing
 
 `swap_tui.py` enforces: incoming `.so` <= embedded slot size, not

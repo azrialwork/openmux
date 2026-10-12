@@ -3,10 +3,14 @@
 # How it works (transplant pipeline, no source compilation):
 #   1. npm pack the upstream opencode-linux-arm64 tarball for the requested version
 #   2. fetch the transplant toolchain at a pinned commit (tools/transplant)
-#   3. build the Bionic libopentui.so (full TUI support) via build-libopentui.sh
+#   3. stage the vendored Bionic libopentui.so (full TUI support; cannot be
+#      built on x86 CI -- see vendor/README.md)
 #   4. run transplant.py all --no-execve: graft the module graph onto the official
 #      Android Bun, revive the standalone entry, swap in the Bionic TUI library
-#   5. sanity-check the output ELF on x86 (can't execve aarch64 here), package it
+#   5. seccomp-harden: inject vendored libopencode-crhandler.so as first
+#      DT_NEEDED via crhandler_patch.py (zero-displacement edit; fixes
+#      SIGSYS "Bad system call" on older kernels)
+#   6. sanity-check the output ELF on x86 (can't execve aarch64 here), package it
 #      with a STABLE asset name, and create the GitHub Release
 #
 # Triggered manually (inputs.version) or by watch-upstream.yml. Runs on free
@@ -126,16 +130,41 @@ jobs:
             --tgz "$TGZ" --no-execve
           ls -la "artifacts/transplant/${{ steps.ver.outputs.version }}/"
 
-      - name: Sanity-check the output ELF
+      - name: Seccomp-harden the binary (fix SIGSYS on older kernels)
         if: steps.skip.outputs.exists == 'false'
         working-directory: build
         run: |
+          # On older Android kernels (e.g. 4.14) the seccomp filter kills the
+          # binary with "Bad system call" (SIGSYS) on syscalls the filter
+          # blocks (close_range and friends). The upstream shim
+          # (libopencode-crhandler.so) installs a SIGSYS handler and
+          # interposes syscall()/close_range(); it is vendored (see
+          # vendor/README.md) and injected as the FIRST DT_NEEDED entry by
+          # crhandler_patch.py -- a zero-displacement surgical edit.
+          # patchelf is deliberately NOT used (it disturbs the transplant
+          # output). The binary finds the shim via DT_RUNPATH
+          # $ORIGIN/../lib/opencode, so the tarball must ship it at
+          # lib/opencode/libopencode-crhandler.so (see package step).
+          mkdir -p artifacts/transplant/crhandler
+          cp -p ../vendor/libopencode-crhandler.so \
+            artifacts/transplant/crhandler/libopencode-crhandler.so
           V="${{ steps.ver.outputs.version }}"
           D="artifacts/transplant/$V"
           # prefer the TUI-swapped product, fall back to the revived one
           if [ -f "$D/opencode-native-tui" ]; then BIN="$D/opencode-native-tui";
           elif [ -f "$D/opencode-native-revived" ]; then BIN="$D/opencode-native-revived";
           else echo "error: no transplant product in $D" >&2; exit 1; fi
+          echo "hardening $BIN"
+          python3 tools/transplant/crhandler_patch.py "$BIN"
+          echo "BIN_PATH=$BIN" >> "$GITHUB_ENV"
+
+      - name: Sanity-check the output ELF
+        if: steps.skip.outputs.exists == 'false'
+        working-directory: build
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          D="artifacts/transplant/$V"
+          BIN="$BIN_PATH"
           echo "product=$BIN"
           file "$BIN" | grep -q "ARM aarch64" \
             || { echo "error: product is not an aarch64 ELF" >&2; exit 1; }
@@ -145,6 +174,9 @@ jobs:
           fi
           readelf -d "$BIN" | grep -q "NEEDED.*libc\.so" \
             || { echo "error: no Bionic libc NEEDED entry" >&2; exit 1; }
+          # seccomp shim must be the first DT_NEEDED entry
+          readelf -d "$BIN" | grep -q "NEEDED.*libopencode-crhandler\.so" \
+            || { echo "error: seccomp shim not injected" >&2; exit 1; }
           python3 -c "
           import json,sys
           r = json.load(open('$D/report.json'))
@@ -158,10 +190,14 @@ jobs:
         working-directory: build
         run: |
           rm -rf dist
-          mkdir -p dist/bin
+          mkdir -p dist/bin dist/lib/opencode
           cp -p "$BIN_PATH" dist/bin/opencode
           chmod +x dist/bin/opencode
-          tar -czf "${{ env.ASSET_NAME }}" -C dist bin
+          # seccomp shim: the hardened binary loads it via DT_RUNPATH
+          # $ORIGIN/../lib/opencode, so it must ship at this exact path
+          cp -p artifacts/transplant/crhandler/libopencode-crhandler.so \
+            dist/lib/opencode/
+          tar -czf "${{ env.ASSET_NAME }}" -C dist bin lib
           sha256sum "${{ env.ASSET_NAME }}" > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -176,6 +212,9 @@ jobs:
 
           Built with the transplant pipeline (module graph grafted onto the official
           Android Bun, standalone entry revived, Bionic libopentui.so for full TUI).
+          Seccomp-hardened: ships libopencode-crhandler.so (injected as first
+          DT_NEEDED) so it survives older kernels' syscall filters instead of
+          dying with SIGSYS 'Bad system call'.
           Zero glibc, no proot.
 
           Install:

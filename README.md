@@ -37,8 +37,11 @@ is added at compile time, which cannot run on Android.
 3. `transplant.py all --no-execve` -- extract the module graph, graft it onto
    the Android Bun, **revive** the standalone entry (patch `BUN_COMPILED.size`
    ASLR-safely), and swap in a Bionic `libopentui.so` for full TUI rendering
-4. Sanity-check the ELF on x86 (aarch64 arch, Bionic `libc.so`, no
-   `libc.so.6`), package it as `opencode-android-aarch64.tar.gz`, and create
+4. **Seccomp-harden** -- inject `libopencode-crhandler.so` as the first
+   `DT_NEEDED` entry (`crhandler_patch.py`, zero-displacement edit); without
+   it, older Android kernels kill the binary with SIGSYS `Bad system call`
+5. Sanity-check the ELF on x86 (aarch64 arch, Bionic `libc.so`, no
+   `libc.so.6`, shim injected), package it as `opencode-android-aarch64.tar.gz`, and create
    the GitHub Release
 
 `watch-upstream.yml` polls upstream every 12 hours and triggers a build for new
