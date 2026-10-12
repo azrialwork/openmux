@@ -1,18 +1,18 @@
 <!--
-  README.md -- Project overview for opencode-termux.
+  README.md -- Project overview for openmux.
 
   What this repo is, how the native Bionic build works, repo layout, setup
   steps, usage, and limitations. One topic: this repo's workflow.
 -->
 
-# opencode-termux
+# openmux
 
 OpenCode running **natively** on Termux (Android aarch64) -- a Bionic-linked
 binary with zero glibc, no proot, no root. Built by GitHub Actions with the
 transplant pipeline and published to GitHub Releases. Install with one line:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/opencode-termux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/azrialwork/openmux/main/install.sh | bash
 ```
 
 After install, set a provider key and run:
@@ -47,7 +47,7 @@ versions automatically.
 ## Layout
 
 ```
-opencode-termux/
+openmux/
   install.sh                 # curl|bash entrypoint (POSIX sh, checksum-verified)
   .github/workflows/
     build.yml                # transplant -> package -> GitHub Release
@@ -63,11 +63,16 @@ Bump it deliberately after checking their changelog.
 
 ## Setup (first time)
 
-1. Create a **private** GitHub repo named `opencode-termux` and push this.
-2. In `install.sh`, set `REPO="your-user/opencode-termux"`.
-3. Actions tab -> `Build native OpenCode` -> Run workflow (version `latest`).
-4. Wait a few minutes, check the new Release, then on your phone run the
-   one-liner above.
+1. Push this repo to GitHub (public repo `azrialwork/openmux`):
+
+   ```sh
+   git remote add origin https://github.com/azrialwork/openmux.git
+   git push -u origin main
+   ```
+
+2. Actions tab -> `Build native OpenCode` -> Run workflow (version `latest`).
+3. Wait a few minutes, check the new Release, then on your phone run the
+   one-liner at the top.
 
 No secrets needed: everything runs on the free tier with `GITHUB_TOKEN`.
 

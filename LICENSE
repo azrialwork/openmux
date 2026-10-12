@@ -1,5 +1,5 @@
 <!--
-  LICENSE -- MIT license for opencode-termux.
+  LICENSE -- MIT license for openmux.
 
   Covers this repo's own files (workflows, install.sh, docs). The transplant
   toolchain fetched at build time is separately MIT-licensed by its authors

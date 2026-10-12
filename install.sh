@@ -2,16 +2,16 @@
 # install.sh -- Install native Bionic OpenCode for Termux (Android/aarch64).
 #
 # One-line install:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/opencode-termux/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/azrialwork/openmux/main/install.sh | bash
 # Pinned version:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USER/opencode-termux/main/install.sh | bash -s -- --version 2.0.22
+#   curl -fsSL https://raw.githubusercontent.com/azrialwork/openmux/main/install.sh | bash -s -- --version 2.0.22
 #
 # What it does: downloads the release tarball built by .github/workflows/build.yml,
 # verifies its SHA-256 checksum, and extracts it into $PREFIX. Short and readable
 # on purpose -- inspect it before piping to bash.
 set -eu
 
-REPO="YOUR_GITHUB_USER/opencode-termux" # <-- set this to your GitHub repo
+REPO="azrialwork/openmux"
 ASSET="opencode-android-aarch64.tar.gz"
 SUMS="SHA256SUMS.txt"
 VERSION="latest"

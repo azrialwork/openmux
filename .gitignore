@@ -1,4 +1,4 @@
-# .gitignore -- opencode-termux: keep build artifacts out of git.
+# .gitignore -- openmux: keep build artifacts out of git.
 # Build outputs live in CI artifacts and GitHub Releases, never in the repo.
 
 transplant-src/
