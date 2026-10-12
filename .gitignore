@@ -1,0 +1,13 @@
+# .gitignore -- opencode-termux: keep build artifacts out of git.
+# Build outputs live in CI artifacts and GitHub Releases, never in the repo.
+
+transplant-src/
+build/
+dist/
+work/
+artifacts/
+*.tgz
+*.tar.gz
+*.deb
+*.pkg.tar.xz
+SHA256SUMS.txt

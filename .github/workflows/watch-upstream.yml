@@ -1,0 +1,51 @@
+# watch-upstream.yml -- Poll upstream opencode releases and trigger a build
+# when a new version appears. Weekly cron + manual dispatch. This is the
+# automation half of the setup; build.yml does the actual work.
+#
+# Pattern: compare latest upstream version (npm, same source build.yml uses)
+# against this repo's releases; trigger build.yml via workflow_dispatch only
+# when the version is new. Idempotent by design.
+
+name: Watch upstream opencode releases
+
+on:
+  schedule:
+    - cron: "0 2 * * 1" # weekly, Monday 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get latest upstream version
+        id: upstream
+        run: |
+          V="$(npm view opencode-linux-arm64 version)"
+          V="${V#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "latest upstream: $V"
+
+      - name: Check if already released here
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.upstream.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.upstream.outputs.version }} already released; nothing to do"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "new version found: ${{ steps.upstream.outputs.version }}"
+          fi
+
+      - name: Trigger build
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build.yml -f version="${{ steps.upstream.outputs.version }}"
+          echo "build.yml triggered for ${{ steps.upstream.outputs.version }}"

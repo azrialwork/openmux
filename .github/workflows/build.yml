@@ -1,0 +1,173 @@
+# build.yml -- Build native Bionic OpenCode for Termux and publish a GitHub Release.
+#
+# How it works (transplant pipeline, no source compilation):
+#   1. npm pack the upstream opencode-linux-arm64 tarball for the requested version
+#   2. fetch the transplant toolchain at a pinned commit (tools/transplant)
+#   3. build the Bionic libopentui.so (full TUI support) via build-libopentui.sh
+#   4. run transplant.py all --no-execve: graft the module graph onto the official
+#      Android Bun, revive the standalone entry, swap in the Bionic TUI library
+#   5. sanity-check the output ELF on x86 (can't execve aarch64 here), package it
+#      with a STABLE asset name, and create the GitHub Release
+#
+# Triggered manually (inputs.version) or by watch-upstream.yml. Runs on free
+# ubuntu-latest in minutes. Idempotent: skips when release v<version> exists.
+
+name: Build native OpenCode (Android/Bionic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "opencode version (e.g. 2.0.22) or 'latest'"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  TRANSPLANT_REPO: Hope2333/opencode-termux
+  # Pinned transplant toolchain commit (native-android branch). Bump deliberately.
+  TRANSPLANT_REF: 736540a066a2ef2f6824064982509583b37eb2ab
+  ASSET_NAME: opencode-android-aarch64.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          V="${{ inputs.version }}"
+          if [ "$V" = "latest" ] || [ -z "$V" ]; then
+            V="$(npm view opencode-linux-arm64 version)"
+          fi
+          # normalize: allow "v2.0.22" or "2.0.22"
+          V="${V#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "building opencode $V"
+
+      - name: Skip if release already exists
+        id: skip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "release v${{ steps.ver.outputs.version }} already exists; skipping build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch transplant toolchain (pinned)
+        if: steps.skip.outputs.exists == 'false'
+        run: |
+          git clone --filter=blob:none --no-checkout \
+            "https://github.com/${{ env.TRANSPLANT_REPO }}.git" transplant-src
+          git -C transplant-src sparse-checkout set tools/transplant
+          git -C transplant-src checkout "${{ env.TRANSPLANT_REF }}"
+          mkdir -p build
+          cp -r transplant-src/tools build/tools
+          ls build/tools/transplant
+
+      - name: Build Bionic libopentui.so (TUI library)
+        if: steps.skip.outputs.exists == 'false'
+        working-directory: build
+        run: |
+          # Required: without it the TUI swap is skipped and the shipped
+          # binary cannot render. Fail loudly instead of shipping degraded.
+          bash tools/transplant/build-libopentui.sh
+          test -f artifacts/transplant/opentui-bionic/libopentui.so
+          echo "bionic libopentui.so ready"
+
+      - name: Download upstream opencode tarball
+        if: steps.skip.outputs.exists == 'false'
+        working-directory: build
+        run: |
+          mkdir -p work
+          npm pack "opencode-linux-arm64@${{ steps.ver.outputs.version }}" \
+            --pack-destination work/
+          ls -la work/
+
+      - name: Run transplant pipeline
+        if: steps.skip.outputs.exists == 'false'
+        working-directory: build
+        run: |
+          # NOTE: --no-execve is mandatory here: an x86 runner cannot execute
+          # an aarch64 ELF. transplant.py still grafts, revives, swaps the TUI
+          # library and writes report.json. Do NOT pre-seed the Android Bun zip:
+          # transplant.py resolves/downloads the base itself per
+          # tools/transplant/config/bun-bind.json so base and revive size-mode
+          # stay matched.
+          TGZ="$(ls work/opencode-linux-arm64-*.tgz | head -1)"
+          python3 tools/transplant/transplant.py all \
+            --ver "${{ steps.ver.outputs.version }}" \
+            --tgz "$TGZ" --no-execve
+          ls -la "artifacts/transplant/${{ steps.ver.outputs.version }}/"
+
+      - name: Sanity-check the output ELF
+        if: steps.skip.outputs.exists == 'false'
+        working-directory: build
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          D="artifacts/transplant/$V"
+          # prefer the TUI-swapped product, fall back to the revived one
+          if [ -f "$D/opencode-native-tui" ]; then BIN="$D/opencode-native-tui";
+          elif [ -f "$D/opencode-native-revived" ]; then BIN="$D/opencode-native-revived";
+          else echo "error: no transplant product in $D" >&2; exit 1; fi
+          echo "product=$BIN"
+          file "$BIN" | grep -q "ARM aarch64" \
+            || { echo "error: product is not an aarch64 ELF" >&2; exit 1; }
+          # Bionic-linked (libc.so), NOT glibc-linked (libc.so.6)
+          if readelf -d "$BIN" | grep -q "libc\.so\.6"; then
+            echo "error: product links glibc (libc.so.6); expected Bionic" >&2; exit 1
+          fi
+          readelf -d "$BIN" | grep -q "NEEDED.*libc\.so" \
+            || { echo "error: no Bionic libc NEEDED entry" >&2; exit 1; }
+          python3 -c "
+          import json,sys
+          r = json.load(open('$D/report.json'))
+          assert r.get('steps', {}).get('revive', {}).get('ok', True), 'revive step not ok'
+          print('report.json: layout', r.get('layout'), '| tui', r.get('tui'))
+          "
+          echo "BIN_PATH=$BIN" >> "$GITHUB_ENV"
+
+      - name: Package release tarball (stable asset name)
+        if: steps.skip.outputs.exists == 'false'
+        working-directory: build
+        run: |
+          rm -rf dist
+          mkdir -p dist/bin
+          cp -p "$BIN_PATH" dist/bin/opencode
+          chmod +x dist/bin/opencode
+          tar -czf "${{ env.ASSET_NAME }}" -C dist bin
+          sha256sum "${{ env.ASSET_NAME }}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        if: steps.skip.outputs.exists == 'false'
+        working-directory: build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          NOTES="Native Bionic OpenCode $V for Termux (Android aarch64).
+
+          Built with the transplant pipeline (module graph grafted onto the official
+          Android Bun, standalone entry revived, Bionic libopentui.so for full TUI).
+          Zero glibc, no proot.
+
+          Install:
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+
+          Verify: SHA256SUMS.txt covers $ASSET_NAME."
+          gh release create "v$V" \
+            --title "OpenCode $V (native Android/Bionic)" \
+            --notes "$NOTES" \
+            "${{ env.ASSET_NAME }}" SHA256SUMS.txt
