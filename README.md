@@ -41,7 +41,7 @@ is added at compile time, which cannot run on Android.
    `libc.so.6`), package it as `opencode-android-aarch64.tar.gz`, and create
    the GitHub Release
 
-`watch-upstream.yml` polls upstream weekly and triggers a build for new
+`watch-upstream.yml` polls upstream every 12 hours and triggers a build for new
 versions automatically.
 
 ## Layout

@@ -1,5 +1,5 @@
 # watch-upstream.yml -- Poll upstream opencode releases and trigger a build
-# when a new version appears. Weekly cron + manual dispatch. This is the
+# when a new version appears. Every 12 hours + manual dispatch. This is the
 # automation half of the setup; build.yml does the actual work.
 #
 # Pattern: compare latest upstream version (npm, same source build.yml uses)
@@ -10,7 +10,7 @@ name: Watch upstream opencode releases
 
 on:
   schedule:
-    - cron: "0 2 * * 1" # weekly, Monday 02:00 UTC
+    - cron: "0 */12 * * *" # every 12 hours
   workflow_dispatch:
 
 permissions:
