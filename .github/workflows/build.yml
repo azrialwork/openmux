@@ -101,6 +101,15 @@ jobs:
             --pack-destination work/
           ls -la work/
 
+      - name: Install llvm-strip (aarch64-capable strip)
+        if: steps.skip.outputs.exists == 'false'
+        run: |
+          # swap_step prefers llvm-strip over GNU strip; GNU strip cannot
+          # process aarch64 ELFs on x86_64 and fails the TUI swap.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm
+          which llvm-strip
+
       - name: Run transplant pipeline
         if: steps.skip.outputs.exists == 'false'
         working-directory: build
