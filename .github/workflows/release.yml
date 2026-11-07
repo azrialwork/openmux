@@ -101,14 +101,42 @@ jobs:
           (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
 
           {
-            echo "openmux v$version"
+            echo "## What this release is"
             echo
-            echo "Built entirely in GitHub Actions from:"
-            echo "- Upstream: anomalyco/opencode $baseline (commit $commit)"
-            echo "- Delta: the patches listed in patches/series at this tag"
+            echo "openmux v$version — OpenCode $baseline with the openmux delta applied. Built entirely in GitHub Actions; nothing was built on a local machine."
             echo
-            echo "Archives contain the \`opencode\` CLI binary for each platform."
-            echo "Verify downloads with the attached SHA256SUMS."
+            echo "## The delta: patches in \`patches/series\` at this tag"
+            echo
+            applied=0
+            while IFS= read -r patch_file; do
+              case "$patch_file" in ''|'#'*) continue ;; esac
+              applied=$((applied + 1))
+              what="$(awk -F'|' -v f="\`$patch_file\`" '$2 ~ f { gsub(/^ +| +$/, "", $3); print $3; exit }' patches/README.md)"
+              if [ -n "$what" ]; then
+                echo "- \`$patch_file\` — $what"
+              else
+                echo "- \`$patch_file\`"
+              fi
+            done < patches/series
+            if [ "$applied" -eq 0 ]; then
+              echo "No patches — this release ships the upstream baseline unchanged."
+            fi
+            echo
+            echo "Full per-patch notes, including why each patch exists: \`patches/README.md\` at this tag."
+            echo
+            echo "## Downloads"
+            echo
+            echo "Each archive contains the \`opencode\` CLI binary for one platform. Sizes and SHA-256 hashes are in the attached \`SHA256SUMS\`; verify a download with:"
+            echo
+            echo '```sh'
+            echo "sha256sum -c SHA256SUMS"
+            echo '```'
+            echo
+            echo "## Provenance"
+            echo
+            echo "- Upstream: \`anomalyco/opencode\` $baseline, commit \`$commit\`"
+            echo "- Delta commit: \`$GITHUB_SHA\`"
+            echo "- Build run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > release-notes.md
           cat release-notes.md
 
