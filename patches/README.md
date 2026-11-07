@@ -18,9 +18,9 @@ of the upstream baseline pinned in `../upstream.json`.
 
 ## Current patches
 
-_None yet. The delta is empty; builds currently produce upstream
-v2.2.6 unchanged._
-
 | File | What it does | Why |
 | --- | --- | --- |
-| — | — | — |
+| `0001-remove-hosted-services-and-infra.patch` | Deletes the hosted services and cloud layer: `services/` (site, files, update), `packages/function`, `infra/`, `sst.config.ts` and `sst-env.d.ts`. | Part of the CLI/TUI-only delta (patches 0001–0004, one decision): openmux supports CLI and TUI only; every other environment is deleted totally — not hidden or disabled. Split into four files only so no single patch exceeds GitHub's 100 MB per-file limit. |
+| `0002-remove-web-gui-and-gui-packages.patch` | Deletes the web GUI and the GUI-only packages: `packages/app`, `packages/ui`, `packages/session-ui`, `packages/gui-plugins` and `packages/stories`. | Same CLI/TUI-only delta as above. |
+| `0003-remove-desktop-docs-sdk-and-other-envs.patch` | Deletes the Electron desktop app (`packages/desktop`), the docs site (`packages/web`), the SDK (`packages/sdk`), the VS Code extension (`sdks/vscode`), `packages/stats`, and the desktop browser plugin (`packages/plugin-browser`). | Same CLI/TUI-only delta as above. |
+| `0004-remove-all-references-to-deleted-envs.patch` | Removes every reference to the deleted environments in the remaining tree: the web UI embedded into the CLI build and served by its server (`app-assets`/`web-ui` bundling), the CLI `pair` and `acp` commands, the server pairing endpoints, the plugin GUI SDK and GUI-bundle plumbing, the workerd server entry, root workspaces/scripts/catalog and the regenerated `bun.lock`, plus CI/release/nix/docs references. The internal API server the CLI/TUI run on stays; it now serves only its API. | Same CLI/TUI-only delta as above — deletion is total, references included, so nothing in the remaining tree points at an environment that no longer exists. |

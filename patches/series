@@ -2,3 +2,7 @@
 # Lines starting with # and blank lines are ignored.
 # Example:
 # 0001-short-description.patch
+0001-remove-hosted-services-and-infra.patch
+0002-remove-web-gui-and-gui-packages.patch
+0003-remove-desktop-docs-sdk-and-other-envs.patch
+0004-remove-all-references-to-deleted-envs.patch
