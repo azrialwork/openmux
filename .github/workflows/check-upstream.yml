@@ -1,0 +1,53 @@
+name: check-upstream
+
+# Checks every 6 hours whether upstream OpenCode has published a
+# newer v2.x.x than the baseline pinned in upstream.json.
+#
+# A newer version is reported as a GitHub issue (one per version, no
+# duplicates). The baseline is never moved automatically — that
+# decision, and rebasing the patches, belongs to Boss.
+
+on:
+  schedule:
+    # Every 6 hours, offset from the top of the hour.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check upstream
+        id: check
+        run: scripts/check-upstream.sh
+
+      - name: Open an issue for a new upstream version
+        if: steps.check.outputs.has_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.check.outputs.latest_tag }}
+          BASELINE: ${{ steps.check.outputs.baseline_tag }}
+          COMMIT: ${{ steps.check.outputs.latest_commit }}
+        run: |
+          title="Upstream OpenCode $LATEST available (baseline: $BASELINE)"
+          existing="$(gh issue list --search "$title in:title" --state open --json number --jq length)"
+          if [ "$existing" != "0" ]; then
+            echo "An open issue for $LATEST already exists; not duplicating it."
+            exit 0
+          fi
+          gh label create upstream --description "Upstream OpenCode tracking" --color "5319e7" --force || true
+          gh issue create \
+            --title "$title" \
+            --label upstream \
+            --body "Upstream \`anomalyco/opencode\` published **$LATEST** (commit \`$COMMIT\`).
+
+          The pinned baseline in \`upstream.json\` is still \`$BASELINE\`.
+
+          Moving the baseline means: update \`upstream.json\` and \`UPSTREAM.md\`, re-apply every patch in \`patches/series\` onto $LATEST, and let CI prove they still apply and build. This issue is a report only — no automatic rebase was performed."

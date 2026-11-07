@@ -1,0 +1,7 @@
+# Build output produced by scripts/apply-patches.sh and CI
+/work/
+/build/
+
+# Local tooling noise
+.DS_Store
+*.log

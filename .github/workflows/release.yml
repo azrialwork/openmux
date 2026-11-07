@@ -1,0 +1,122 @@
+name: release
+
+# Release builds run entirely in GitHub Actions.
+#
+# Trigger:
+#   - push a tag like v0.1.0 (the openmux version — independent of
+#     the upstream version it is built on), or
+#   - run this workflow manually and supply a version.
+#
+# Each matrix job builds one target with scripts/build.sh (pinned
+# upstream baseline + patches/series) and uploads the archive.
+# The publish job then collects every archive, writes a combined
+# SHA256SUMS, and creates the GitHub Release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.1.0 (without the leading v)"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Build openmux (${{ matrix.target }})
+        run: scripts/build.sh "${{ matrix.target }}" build/out
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: build/out/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Prepare release notes and checksums
+        id: prep
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${INPUT_VERSION#v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+          baseline="$(jq -r .baseline_tag upstream.json)"
+          commit="$(jq -r .baseline_commit upstream.json)"
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+
+          rm -f release-assets/*.sha256
+          (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
+
+          {
+            echo "openmux v$version"
+            echo
+            echo "Built entirely in GitHub Actions from:"
+            echo "- Upstream: anomalyco/opencode $baseline (commit $commit)"
+            echo "- Delta: the patches listed in patches/series at this tag"
+            echo
+            echo "Archives contain the \`opencode\` CLI binary for each platform."
+            echo "Verify downloads with the attached SHA256SUMS."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.prep.outputs.tag }}" \
+            release-assets/*.tar.gz release-assets/SHA256SUMS \
+            --title "openmux ${{ steps.prep.outputs.tag }} (on OpenCode ${{ steps.prep.outputs.baseline }})" \
+            --notes-file release-notes.md

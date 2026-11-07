@@ -1,0 +1,76 @@
+name: ci
+
+# CI for the delta repository itself:
+#  1. validate — upstream.json is valid, scripts parse, and every
+#     patch in patches/series applies cleanly onto the pinned
+#     upstream baseline.
+#  2. build — the full build, done here in GitHub Actions (never on
+#     a local machine for a release): baseline + patches, built with
+#     scripts/build.sh, smoke-tested, uploaded as an artifact.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate upstream.json and scripts
+        run: |
+          jq -e '.upstream_url and .baseline_tag and .baseline_commit' upstream.json
+          for script in scripts/*.sh; do bash -n "$script"; done
+
+      - name: Check patches apply onto the pinned baseline
+        run: |
+          baseline="$(jq -r .baseline_tag upstream.json)"
+          git clone --depth 1 --branch "$baseline" "$(jq -r .upstream_url upstream.json)" work/src
+          count=0
+          while IFS= read -r patch_file; do
+            case "$patch_file" in ''|'#'*) continue ;; esac
+            echo "Checking patches/$patch_file"
+            git -C work/src apply --check "$GITHUB_WORKSPACE/patches/$patch_file"
+            git -C work/src apply --index "$GITHUB_WORKSPACE/patches/$patch_file"
+            count=$((count + 1))
+          done < patches/series
+          echo "Checked $count patch(es) against $baseline"
+
+  build:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Build openmux (linux-x64)
+        run: scripts/build.sh linux-x64 build/out
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openmux-linux-x64
+          path: build/out/*
+          if-no-files-found: error
+          retention-days: 14
