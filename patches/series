@@ -7,7 +7,3 @@
 0003-remove-desktop-docs-sdk-and-other-envs.patch
 0004-remove-all-references-to-deleted-envs.patch
 0005-keep-only-opencode-free-models-and-custom-providers.patch
-0006-remove-per-model-system-prompts.patch
-0007-restructure-built-in-tool-descriptions.patch
-0008-agent-system-prompts-and-code-permissions.patch
-0009-enforce-delegation-and-tool-appropriateness-in-code.patch
