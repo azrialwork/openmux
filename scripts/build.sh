@@ -37,8 +37,14 @@ bun install --frozen-lockfile
 #    build.ts selects the target from OPENCODE_TARGET and uses the
 #    models catalog committed in upstream when
 #    OPENCODE_MODELS_SNAPSHOT is unset, so the build is reproducible.
+#    OPENCODE_VERSION stamps the binary with the real upstream
+#    version (the pinned baseline tag, e.g. 2.2.6): without it the
+#    upstream build script falls back to a synthetic
+#    0.0.0-detached-<build> version because the build checkout is a
+#    detached clone.
+version="$(jq -r .baseline_tag "$repo_root/upstream.json" | sed 's/^v//')"
 cd "$work_dir/src/packages/cli"
-OPENCODE_TARGET="$target" bun run script/build.ts
+OPENCODE_TARGET="$target" OPENCODE_VERSION="$version" bun run script/build.ts
 
 # 4. Smoke test the produced binary, then package it.
 binary="$work_dir/src/packages/cli/dist/cli-$target/bin/opencode"
