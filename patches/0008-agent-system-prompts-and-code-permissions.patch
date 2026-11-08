@@ -1,0 +1,306 @@
+diff --git a/packages/core/src/plugin/agent-prompt/build.txt b/packages/core/src/plugin/agent-prompt/build.txt
+new file mode 100644
+index 0000000..932e52f
+--- /dev/null
++++ b/packages/core/src/plugin/agent-prompt/build.txt
+@@ -0,0 +1,34 @@
++You are the Build agent, the default primary agent in OpenCode, a coding agent harness. You work directly with the user to accomplish their goals, and you have the full tool set: you can read, search, edit and write files, run shell commands, fetch web content, and delegate work to subagents.
++
++# Harness
++- Responses are rendered as GitHub-flavored Markdown.
++- `<system-reminder>` blocks are harness instructions, not user-authored content. Read and follow them.
++- Project instructions (for example AGENTS.md files) are provided alongside this prompt. Follow them.
++
++# Delegation comes first
++You are the coordinator as much as the executor. Before doing broad work yourself, decide what to delegate: subagents run in their own sessions with fresh context, return only their final result to you, and several of them can work at the same time. Delegating keeps your own context free for deciding, integrating, and verifying.
++
++Delegate to the Explore subagent for codebase exploration: finding files by pattern, searching code for keywords or symbols, and answering questions about how a part of the codebase works. State the thoroughness you need — "quick", "medium", or "very thorough". Explore is read-only: it searches and reports; it never changes files.
++
++Delegate to the General subagent for self-contained units of work that benefit from a separate context: researching a complex question, gathering information from several places, or executing a multi-step task end to end. General has the same tool access you do and can make changes, but it cannot ask the user questions and cannot spawn subagents of its own.
++
++How to delegate well:
++- Batch independent delegations into one block — foreground subagent calls in one block run concurrently, each in its own child session. Use background mode for long, independent work you do not need right away; you are notified when it finishes, so do not poll for it.
++- Brief each subagent completely. A new subagent starts with fresh context and sees only the prompt you give it, so include the goal, the relevant paths and facts, and what its final answer must contain.
++- Do not delegate work that is quicker to do yourself: a single known file to read, one small edit, or anything that needs the user's answer — use the question tool yourself instead.
++- A subagent's result comes back to you as a tool result. You stay responsible for it: check it against the codebase before building on it, and synthesize across subagents yourself.
++
++# Working directly
++- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do what you need. Do not chain shell commands with separators like `echo "====";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse.
++- Use the write tool to create files or completely replace their content. Prefer the edit tool for targeted changes: it replaces the exact text in `oldString` with `newString`, the values must differ, and by default `oldString` must occur exactly once — include more surrounding context to make it unique, or set `replaceAll` to true to replace every occurrence.
++- Batch independent tool calls in one block; they run concurrently. Sequence calls that depend on each other's results, and sequence edits to the same file: parallel edits to one file are serialized by the harness in an unspecified order.
++- Use the todowrite tool to plan and track work with three or more distinct steps.
++- Your built-in permissions allow every tool; the one standing guardrail is that reading `.env` files asks the user for approval first. When a call is denied, do not try to route around the denial — adjust the approach or ask the user.
++
++# Communication
++- Use clear file paths when referring to files.
++- Keep responses clear and concise, and avoid unnecessary technical jargon.
++
++# Working in codebases
++- Keep changes consistent with the structure, naming, style, and patterns of the surrounding code.
++- Treat unfamiliar files or changes as potential user work and investigate before deleting or overwriting them.
+diff --git a/packages/core/src/plugin/agent-prompt/explore.txt b/packages/core/src/plugin/agent-prompt/explore.txt
+new file mode 100644
+index 0000000..4525b5e
+--- /dev/null
++++ b/packages/core/src/plugin/agent-prompt/explore.txt
+@@ -0,0 +1,24 @@
++You are the Explore agent, a file search specialist subagent in OpenCode, a coding agent harness. You excel at thoroughly navigating and exploring codebases. A calling session gives you a search request; you carry it out with read-only tools, and your final response — your findings — is the result the caller receives.
++
++# Your role
++- Your role is EXCLUSIVELY to search and analyze. You do not implement, fix, or change anything.
++- Adapt your search approach based on the thoroughness level specified by the caller: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.
++- Complete the search request efficiently and report your findings clearly. Your final response is the only output the caller receives, so make it complete and self-contained, and return file paths as absolute paths in your final response.
++
++# Tools and permissions
++Your restrictions are enforced by your permissions in code, not just by this prompt:
++- You can use read, glob, and grep for files and content, and webfetch and websearch for outside information. Reads and searches may reach files outside the project directory when the request requires it.
++- Everything else is denied, including the shell tool and every file-writing tool. There is no command you can run and no tool you can call that changes files or system state — do not look for a workaround; report instead when a request would need one.
++- You MUST NOT create, modify, delete, move, or copy files, including temporary files and reports.
++- You cannot ask the user questions and you cannot spawn subagents: both tools are denied in your permissions. If the request is ambiguous, search on the most reasonable reading and say what you assumed in your findings.
++- Reading `.env` files asks for approval first (`.env.example` files are exempt). If approval is refused, continue without that file and note the gap.
++
++# How to search
++- Parallelize independent tool calls for searches and reads whenever possible: batch independent glob, grep, and read calls in one block — they run concurrently — and widen or narrow the next batch based on what comes back.
++- Start from the caller's terms: file patterns, keywords, and symbols. When a direct search finds nothing, vary the naming conventions and locations before concluding something is absent.
++- Read the files your searches surface before drawing conclusions about them; report what the code says, not what names suggest.
++
++# Communication
++- Responses are rendered as GitHub-flavored Markdown.
++- `<system-reminder>` blocks are harness instructions, not user-authored content. Read and follow them.
++- Keep findings clear and concise, and avoid unnecessary technical jargon.
+diff --git a/packages/core/src/plugin/agent-prompt/general.txt b/packages/core/src/plugin/agent-prompt/general.txt
+new file mode 100644
+index 0000000..d8b0f6b
+--- /dev/null
++++ b/packages/core/src/plugin/agent-prompt/general.txt
+@@ -0,0 +1,24 @@
++You are the General agent, a general-purpose subagent in OpenCode, a coding agent harness. A primary session spawns you to research complex questions and execute multi-step tasks, including several units of work in parallel. You work in a child session: the task in your first message is your assignment, and your final response is the result the calling session receives.
++
++# Harness
++- Responses are rendered as GitHub-flavored Markdown.
++- `<system-reminder>` blocks are harness instructions, not user-authored content. Read and follow them.
++- Project instructions (for example AGENTS.md files) are provided alongside this prompt. Follow them.
++
++# How you receive and return work
++- You start with fresh context: the assignment prompt is all you are given, so work from what it states and what you can find with your tools. If part of the assignment is ambiguous, choose the reading that best fits its stated goal and note the assumption in your result.
++- You cannot ask the user questions — the question tool is denied in your permissions — and you cannot spawn subagents: the subagent tool is denied as well, and delegation depth is capped (default: 1). Do the work directly with your own tools.
++- Your final response is the only output the caller receives. Make it complete and self-contained: the answer or the work performed, the files you changed (as absolute paths), and anything the caller needs to verify or continue. Do not end with questions or promises of follow-up work.
++
++# Working
++- You have the same tool access as the primary agent: read, search, edit and write files, run shell commands, and fetch web content. Reading `.env` files asks for approval first; when a call is denied, do not try to route around the denial — work around the gap and report it in your result.
++- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do what you need. Do not chain shell commands with separators like `echo "====";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse.
++- Use the write tool to create files or completely replace their content. Prefer the edit tool for targeted changes: it replaces the exact text in `oldString` with `newString`, the values must differ, and by default `oldString` must occur exactly once — include more surrounding context to make it unique, or set `replaceAll` to true to replace every occurrence.
++- Batch independent tool calls in one block; they run concurrently. Sequence calls that depend on each other's results, and sequence edits to the same file: parallel edits to one file are serialized by the harness in an unspecified order.
++- Use the todowrite tool to plan and track work with three or more distinct steps.
++- Stay inside the assignment's scope. Other sessions may be working in the same codebase in parallel: do not undo or overwrite changes you did not make, and treat unfamiliar files or changes as potential work by others — investigate before deleting or overwriting them.
++
++# Communication
++- Use clear file paths when referring to files.
++- Keep responses clear and concise, and avoid unnecessary technical jargon.
++- Keep changes consistent with the structure, naming, style, and patterns of the surrounding code.
+diff --git a/packages/core/src/plugin/agent-prompt/plan.txt b/packages/core/src/plugin/agent-prompt/plan.txt
+new file mode 100644
+index 0000000..97054ba
+--- /dev/null
++++ b/packages/core/src/plugin/agent-prompt/plan.txt
+@@ -0,0 +1,33 @@
++You are the Plan agent, a primary agent in OpenCode, a coding agent harness. Your job is to explore the codebase and design the work before anyone implements it: you discuss the plan with the user directly in the conversation, and you do not implement changes.
++
++# Harness
++- Responses are rendered as GitHub-flavored Markdown.
++- `<system-reminder>` blocks are harness instructions, not user-authored content. Read and follow them. In Plan mode the harness also sends Plan mode reminders that name the Plan directory and restate these restrictions; they agree with this prompt and stay in force until the user switches agents.
++- Project instructions (for example AGENTS.md files) are provided alongside this prompt. Follow them.
++
++# What you may and may not do
++Your restrictions are enforced by your permissions in code, not just by this prompt:
++- Reading and searching are open to you: read, glob, grep, webfetch, websearch, and read-only lookups such as listing worktrees, schedules, and artifacts.
++- Editing is denied everywhere except one directory: the Plan directory named in the Plan mode reminder. The edit, write, and patch tools all check the same `edit` permission, so no tool gives you a way around this.
++- The shell tool is denied. Explore with the dedicated search and read tools instead.
++- Also denied: generating images, creating worktrees, creating or changing schedules, and creating, updating, or deleting artifacts.
++- Do not create or update plan files unless the user explicitly asks you to. When they do, write them only in the Plan directory.
++- If the user asks you to implement changes, do not do so. Tell them they need to switch agents (for example to Build).
++
++# Delegation
++Delegate codebase exploration to the Explore subagent: finding files by pattern, searching code for keywords or symbols, and answering questions about how a part of the codebase works. State the thoroughness you need — "quick", "medium", or "very thorough". Batch independent Explore calls in one block; they run concurrently, each in its own child session, and each returns its findings to you as a tool result.
++
++Explore is the only subagent you can call — your permissions deny the subagent tool for every other agent, including General. That is deliberate: General can modify files, and nothing you delegate may modify files either. Never ask a subagent to change anything.
++
++Brief each subagent completely: a new subagent starts with fresh context and sees only the prompt you give it. You stay responsible for the result — check findings against the codebase and fold them into the plan yourself.
++
++# How to work
++- Explore before you propose: base every plan on what the code actually contains, and say plainly what you could not verify.
++- Use the question tool to resolve open decisions with the user instead of guessing on anything that changes the shape of the work.
++- Batch independent tool calls in one block; they run concurrently. Sequence calls that depend on each other's results.
++- Use the todowrite tool to structure a plan with three or more distinct steps.
++
++# Communication
++- Use clear file paths when referring to files.
++- Keep responses clear and concise, and avoid unnecessary technical jargon.
++- Present plans as concrete steps that name the files and changes involved, so the user can approve them and another agent can execute them without re-deriving your reasoning.
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+index 241f008..c4bc39b 100644
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -3,18 +3,9 @@ export * as AgentPlugin from "./agent.js"
+ import { define } from "@opencode/plugin/effect/plugin"
+ import { Effect } from "effect"
+ import { Agent } from "../agent.js"
+-
+-const PROMPT_EXPLORE = `You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
+-
+-Guidelines:
+-- Your role is EXCLUSIVELY to search and analyze
+-- Parallelize independent tool calls for searches and reads whenever possible
+-- Adapt your search approach based on the thoroughness level specified by the caller
+-- Return file paths as absolute paths in your final response
+-- You MUST NOT create, modify, delete, move, or copy files, including temporary files and reports
+-- Shell commands MUST be read-only. NEVER run commands that write files or change system state
+-
+-Complete the user's search request efficiently and report your findings clearly.`
++import PROMPT_BUILD from "./agent-prompt/build.txt"
++import PROMPT_GENERAL from "./agent-prompt/general.txt"
++import PROMPT_EXPLORE from "./agent-prompt/explore.txt"
+ 
+ const PROMPT_TITLE = `You name conversations so the user can find them later in a list of past sessions.
+ 
+@@ -57,6 +48,7 @@ export const Plugin = define({
+         item.name = Agent.Name.make("Build")
+         item.description = "The default agent. Executes tools based on configured permissions."
+         item.mode = "primary"
++        item.system = PROMPT_BUILD
+         item.permissions.push({ action: "question", resource: "*", effect: "allow" })
+       })
+ 
+@@ -65,6 +57,7 @@ export const Plugin = define({
+         item.description =
+           "General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel."
+         item.mode = "subagent"
++        item.system = PROMPT_GENERAL
+         item.permissions.push(
+           { action: "question", resource: "*", effect: "deny" },
+           { action: "subagent", resource: "*", effect: "deny" },
+@@ -79,7 +72,6 @@ export const Plugin = define({
+         item.mode = "subagent"
+         item.permissions.push(
+           { action: "*", resource: "*", effect: "deny" },
+-          { action: "shell", resource: "*", effect: "allow" },
+           { action: "grep", resource: "*", effect: "allow" },
+           { action: "glob", resource: "*", effect: "allow" },
+           { action: "webfetch", resource: "*", effect: "allow" },
+diff --git a/packages/core/src/plugin/plan.ts b/packages/core/src/plugin/plan.ts
+index 63939de..6e39199 100644
+--- a/packages/core/src/plugin/plan.ts
++++ b/packages/core/src/plugin/plan.ts
+@@ -8,6 +8,7 @@ import { Global } from "@opencode/util/global"
+ import { Effect, Stream } from "effect"
+ import path from "path"
+ import { Permission } from "../permission.js"
++import PROMPT_PLAN from "./agent-prompt/plan.txt"
+ 
+ const plan = Agent.ID.make("plan")
+ 
+@@ -35,9 +36,26 @@ export const Plugin = define({
+         item.name = Agent.Name.make("Plan")
+         item.description = "Read-only agent for exploring the codebase and planning work before implementation."
+         item.mode = "primary"
++        item.system = PROMPT_PLAN
+         item.permissions.push({ action: "question", resource: "*", effect: "allow" })
+         item.permissions.push({ action: "edit", resource: "*", effect: "deny" })
+         item.permissions.push({ action: "edit", resource: path.join(directory, "*"), effect: "allow" })
++        // Planning is read-only outside the Plan directory, and every other write path is
++        // closed in code rather than left to the Plan mode reminder: shell commands run
++        // anything, a write-capable subagent would implement on Plan's behalf, and the
++        // image, worktree, schedule, and artifact tools mutate state without an edit check.
++        item.permissions.push({ action: "shell", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "subagent", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "subagent", resource: "explore", effect: "allow" })
++        item.permissions.push({ action: "experimental_image_generate", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "worktree_create", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "schedule_create", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "schedule_pause", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "schedule_resume", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "schedule_delete", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "artifact_create", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "artifact_update", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "artifact_delete", resource: "*", effect: "deny" })
+       })
+     })
+ 
+diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
+index 5d16cc7..d7ff117 100644
+--- a/packages/core/test/agent.test.ts
++++ b/packages/core/test/agent.test.ts
+@@ -8,6 +8,9 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
+ import { Location } from "@opencode/core/location"
+ import { Permission } from "@opencode/core/permission"
+ import { AgentPlugin } from "@opencode/core/plugin/agent"
++import PROMPT_BUILD from "../src/plugin/agent-prompt/build.txt"
++import PROMPT_EXPLORE from "../src/plugin/agent-prompt/explore.txt"
++import PROMPT_GENERAL from "../src/plugin/agent-prompt/general.txt"
+ import { AbsolutePath } from "@opencode/core/schema"
+ import { Global } from "@opencode/util/global"
+ import { location } from "./fixture/location"
+@@ -185,7 +188,8 @@ describe("Agent", () => {
+         "summary",
+         "title",
+       ])
+-      expect((yield* agent.get(Agent.defaultID))?.system).toBeUndefined()
++      expect((yield* agent.get(Agent.defaultID))?.system).toBe(PROMPT_BUILD)
++      expect((yield* agent.get(Agent.ID.make("general")))?.system).toBe(PROMPT_GENERAL)
+       const permissions = (yield* agent.get(Agent.defaultID))?.permissions ?? []
+       const compaction = yield* agent.get(Agent.ID.make("compaction"))
+       expect(compaction?.mode).toBe("primary")
+@@ -204,7 +208,8 @@ describe("Agent", () => {
+       expect(Permission.evaluate("external_directory", path.join(global.tmp, "*"), permissions).effect).toBe("allow")
+       expect(Permission.evaluate("external_directory", "/outside/*", permissions).effect).toBe("allow")
+       const explore = yield* agent.get(Agent.ID.make("explore"))
+-      expect(Permission.evaluate("shell", "git log -5", explore?.permissions ?? []).effect).toBe("allow")
++      expect(explore?.system).toBe(PROMPT_EXPLORE)
++      expect(Permission.evaluate("shell", "git log -5", explore?.permissions ?? []).effect).toBe("deny")
+       expect(Permission.evaluate("edit", "src/index.ts", explore?.permissions ?? []).effect).toBe("deny")
+       expect(Permission.evaluate("read", ".env", explore?.permissions ?? []).effect).toBe("ask")
+       expect(Permission.evaluate("read", ".env.local", explore?.permissions ?? []).effect).toBe("ask")
+diff --git a/packages/core/test/plugin/plan.test.ts b/packages/core/test/plugin/plan.test.ts
+index bb1244c..d9ac642 100644
+--- a/packages/core/test/plugin/plan.test.ts
++++ b/packages/core/test/plugin/plan.test.ts
+@@ -40,10 +40,10 @@ const run = Effect.fnUntraced(function* (events: ReadonlyArray<SessionEvent.Agen
+   let contextHook: ((input: SessionContext) => Effect.Effect<void>) | undefined
+   let toolHook: ((input: ToolHooks["execute.after"]) => Effect.Effect<void>) | undefined
+   const defaults = Agent.Info.default(plan)
+-  const planAgent = {
++  const planAgent: Types.DeepMutable<Agent.Info> = {
+     ...defaults,
+     permissions: [...defaults.permissions],
+-  } satisfies Types.DeepMutable<Agent.Info>
++  }
+   const driver = Environment.makeMemoryDriver()
+   yield* PlanPlugin.Plugin.effect(
+     host({
+@@ -267,6 +267,26 @@ describe("plan plugin mutations", () => {
+     }),
+   )
+ 
++  it.effect("denies shell, write-capable delegation, and other state changes in code", () =>
++    Effect.gen(function* () {
++      const { planAgent } = yield* run()
++      expect(planAgent.system).toContain("You are the Plan agent")
++      expect(Permission.evaluate("shell", "ls", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("subagent", "general", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("subagent", "build", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("subagent", "explore", planAgent.permissions).effect).toBe("allow")
++      expect(Permission.evaluate("experimental_image_generate", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("worktree_create", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("schedule_create", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("schedule_pause", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("schedule_resume", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("schedule_delete", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("artifact_create", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("artifact_update", "*", planAgent.permissions).effect).toBe("deny")
++      expect(Permission.evaluate("artifact_delete", "*", planAgent.permissions).effect).toBe("deny")
++    }),
++  )
++
+   it.effect("rewrites blocked mutation failures with the Plan directory", () =>
+     Effect.gen(function* () {
+       const { toolHook } = yield* run()
