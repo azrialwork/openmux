@@ -8,3 +8,4 @@
 0004-remove-all-references-to-deleted-envs.patch
 0005-keep-only-opencode-free-models-and-custom-providers.patch
 0006-remove-per-model-system-prompts.patch
+0007-restructure-built-in-tool-descriptions.patch

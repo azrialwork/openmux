@@ -1,0 +1,444 @@
+diff --git a/packages/core/src/codemode/tool.ts b/packages/core/src/codemode/tool.ts
+index f8f9813..5e51234 100644
+--- a/packages/core/src/codemode/tool.ts
++++ b/packages/core/src/codemode/tool.ts
+@@ -94,9 +94,10 @@ const description = [
+   "Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.",
+   "`fetch` is available for HTTP requests. Imports, direct filesystem access, and timers are unavailable: there is no `setTimeout` or sleep. All other external access goes through `tools`.",
+   "Within `{ code }`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Inside `{ code }`, ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.",
+-  'Call tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>["tool-name"](input)`.',
++  "Call tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>[\"tool-name\"](input)`.",
+   "Prefer an explicit `return`; if omitted, the final top-level expression becomes the result.",
+   "Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.",
++  "Batching: one execute call is already a script — inside it, sequence dependent calls with await and run independent calls concurrently with Promise.allSettled. Prefer a single execute call per block. Several execute calls in one block run as separate programs in parallel, and file-changing calls they make to the same file are serialized under that file's lock in an unspecified order, so keep same-file work inside one program.",
+ ].join("\n")
+ 
+ export const create = (
+diff --git a/packages/core/src/tool/patch.txt b/packages/core/src/tool/patch.txt
+index 72c0489..444737c 100644
+--- a/packages/core/src/tool/patch.txt
++++ b/packages/core/src/tool/patch.txt
+@@ -1,4 +1,4 @@
+-Use the `patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
++Use the `patch` tool to add, update, delete, or rename files in a single call. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. It is structured as a high‑level envelope:
+ 
+ *** Begin Patch
+ [ one or more file sections ]
+@@ -12,6 +12,8 @@ Each operation starts with one of three headers:
+ *** Delete File: <path> - remove an existing file. Nothing follows.
+ *** Update File: <path> - patch an existing file in place (optionally with a rename).
+ 
++An update that renames the file adds a `*** Move to: <path>` line directly after its `*** Update File:` header, as shown in the example below.
++
+ Example patch:
+ 
+ ```
+@@ -31,3 +33,13 @@ It is important to remember:
+ 
+ - You must include a header with your intended action (Add/Delete/Update)
+ - You must prefix new lines with `+` even when creating a new file
++
++Applying a patch:
++
++- Operations apply in the order written, while every touched path is held under a lock. If an operation fails, the patch stops there: operations already applied stay applied, and the error reports which files were completed before the failure. A patch is not rolled back.
++- The result lists the applied operations (A for add, D for delete, M for update) and a diff for each file.
++
++Batching:
++
++- Prefer ONE patch call for a multi-file change — a single call already applies many file operations in the order you write them.
++- Batch a patch with edits or writes to other files freely. Never batch two calls that touch the same file: they are serialized under that file's lock in an unspecified order, so make same-file changes in sequence instead.
+diff --git a/packages/core/src/tool/plugin/artifact.ts b/packages/core/src/tool/plugin/artifact.ts
+index 9b353f1..da2ddcf 100644
+--- a/packages/core/src/tool/plugin/artifact.ts
++++ b/packages/core/src/tool/plugin/artifact.ts
+@@ -96,7 +96,7 @@ export const Plugin = {
+ 
+         editor.add({
+           name: "artifact_read",
+-          description: "Read an artifact's metadata and file contents so you can inspect or update it.",
++          description: "Read an artifact's metadata and file contents so you can inspect or update it.\n\nReturns the artifact's info and the contents of its files.\n\nBatching: batch reads of different artifacts freely — they are independent and run in parallel. Do not batch a read of an artifact with an update or delete of that same artifact when the read must reflect the update or precede the delete: calls in one block run concurrently with no ordering guarantee.",
+           input: ReadToolInput,
+           output: Artifact.Content,
+           options: { namespace: "opencode", codemode: true },
+@@ -112,7 +112,7 @@ export const Plugin = {
+ 
+         editor.add({
+           name: "artifact_update",
+-          description: "Replace an existing artifact's files at the same ID and URL.",
++          description: "Replace an existing artifact's files at the same ID and URL.\n\nDetails:\n- The `files` map replaces the artifact's current files as a whole. `title` and `entry` change only when provided.\n- The result confirms the artifact's title, ID, and URL.\n\nBatching: batch updates of different artifacts freely. Sequence updates to the same artifact — each call replaces the files wholesale, so parallel updates to one artifact apply in an unspecified order and only one survives. Also sequence an update before a read or delete of the same artifact that must observe it or follow it.",
+           input: UpdateToolInput,
+           output: Artifact.Info,
+           options: { namespace: "opencode", codemode: true },
+@@ -135,7 +135,7 @@ export const Plugin = {
+ 
+         editor.add({
+           name: "artifact_delete",
+-          description: "Delete an artifact and remove its stored copy.",
++          description: "Delete an artifact and remove its stored copy. The artifact's URL stops working and the deletion cannot be undone.\n\nBatching: batch deletions of different artifacts freely. Never batch a delete with a read or update of the same artifact — those calls would race the deletion.",
+           input: DeleteToolInput,
+           output: DeleteToolOutput,
+           options: { namespace: "opencode", codemode: true },
+diff --git a/packages/core/src/tool/plugin/edit.ts b/packages/core/src/tool/plugin/edit.ts
+index e0f629b..a7489a3 100644
+--- a/packages/core/src/tool/plugin/edit.ts
++++ b/packages/core/src/tool/plugin/edit.ts
+@@ -272,7 +272,7 @@ export const Plugin = {
+           name,
+           options: { codemode: false, permission: "edit" },
+           description:
+-            "Edit the contents of a file by finding and replacing exact text. When editing text from Read output, preserve the exact indentation (tabs or spaces) and omit the line-number prefix, such as `1: `. Never include the prefix in oldString or newString. Write line breaks as \\n; the file's existing CRLF or LF line endings are matched and preserved. To change line endings themselves, make oldString and newString differ only in \\r; that edit applies to the exact bytes. If there is no exact match, the edit retries while ignoring typographic quote, dash, and space variants, then trailing whitespace on each line. The edit fails if oldString is not found. By default, oldString must identify a UNIQUE location. Multiple matches FAIL unless replaceAll is true. Add more surrounding context to disambiguate, or set replaceAll to true to replace every occurrence. Use replaceAll when the change should apply to every occurrence, such as renaming a variable.",
++            "Edit the contents of a file by finding and replacing exact text.\n\nMatching:\n- Copy text from read output exactly: preserve the exact indentation (tabs or spaces) and omit the line-number prefix, such as `1: `. Never include the prefix in oldString or newString.\n- Write line breaks as \\n; the file's existing CRLF or LF line endings are matched and preserved. To change line endings themselves, make oldString and newString differ only in \\r; that edit applies to the exact bytes.\n- If there is no exact match, the edit retries while ignoring typographic quote, dash, and space variants, then trailing whitespace on each line. The edit fails if oldString is still not found; the failure may show the closest lines in the file, or note that newString is already present, so you can correct oldString without rereading the file.\n- oldString must not be empty (use write to create or overwrite a file), and oldString and newString must differ.\n\nUniqueness:\n- By default, oldString must identify a UNIQUE location. Multiple matches FAIL unless replaceAll is true.\n- Add more surrounding context to disambiguate, or set replaceAll to true to replace every occurrence. Use replaceAll when the change should apply to every occurrence, such as renaming a variable.\n- The result reports the number of replacements made and a diff of the changed file.\n\nBatching: batch edits to different files freely — calls in one block run in parallel, and each file's read-modify-write runs under a per-file lock, so parallel edits cannot corrupt a file. Sequence edits to the same file when one depends on another's result: same-file edits are applied one at a time in an unspecified order, and each oldString is matched against the file as it stands at that moment.",
+           input: Input,
+           output: Output,
+           execute: (input, context) => {
+diff --git a/packages/core/src/tool/plugin/glob.ts b/packages/core/src/tool/plugin/glob.ts
+index 1fd7ee4..b5ee2b3 100644
+--- a/packages/core/src/tool/plugin/glob.ts
++++ b/packages/core/src/tool/plugin/glob.ts
+@@ -58,7 +58,7 @@ export const Plugin = {
+         editor.add({
+           name,
+           options: { codemode: false },
+-          description: 'Search file paths using a glob pattern (examples: "**/*.ts", "src/**/*.tsx").',
++          description: 'Search file paths using a glob pattern (examples: "**/*.ts", "src/**/*.tsx").\n\nDetails:\n- Searches under `path` (default: the current working directory) and returns the matching paths, one per line, or "No files found" when nothing matches.\n- Hidden files and directories are skipped unless hidden is true.\n- Results are capped at `limit` matches (default: 100); a truncated result says so — narrow the path or pattern to see the rest.\n- Use grep, not glob, to search file contents.\n\nBatching: preferred — glob is read-only, so batch independent patterns or directories in one block to run them in parallel.',
+           input: Input,
+           output: Output,
+           execute: (input, context) =>
+diff --git a/packages/core/src/tool/plugin/grep.ts b/packages/core/src/tool/plugin/grep.ts
+index e142698..bcfe00a 100644
+--- a/packages/core/src/tool/plugin/grep.ts
++++ b/packages/core/src/tool/plugin/grep.ts
+@@ -77,7 +77,7 @@ export const Plugin = {
+           name,
+           options: { codemode: false },
+           description:
+-            "Search file contents using ripgrep's regular expression syntax or literal text matching. Use it to locate specific code, symbols, or text patterns, and narrow searches with `path` or `include`. Returns matching file paths, line numbers, and line previews.",
++            "Search file contents using ripgrep's regular expression syntax or literal text matching.\n\nUse it to locate specific code, symbols, or text patterns. Narrow the search with `path` (a file or directory; default: the current working directory) and `include` (a glob filter for the files to search).\n\nDetails:\n- Set literal to true to treat `pattern` as exact text instead of a regular expression. Matching is case-sensitive by default; set caseSensitive to false to ignore case. An invalid regular expression fails with an error.\n- Returns matching file paths, line numbers, and line previews, grouped by file.\n- Results are capped at `limit` matching lines (default: 100); a truncated result says so — narrow the path, include filter, or pattern to see the rest.\n\nBatching: preferred — grep is read-only, so batch independent searches in one block to run them in parallel.",
+           input: Input,
+           output: Output,
+           execute: (input, context) =>
+diff --git a/packages/core/src/tool/plugin/image-generate.ts b/packages/core/src/tool/plugin/image-generate.ts
+index e03d51f..0c08b57 100644
+--- a/packages/core/src/tool/plugin/image-generate.ts
++++ b/packages/core/src/tool/plugin/image-generate.ts
+@@ -39,10 +39,12 @@ const EXTENSIONS: Record<string, string> = {
+ export const description = [
+   "Generates a new image, or edits existing ones.",
+   "Only call this when the user asks you to create or edit an image. If you think an image would help but the user didn't ask for one, ask them first instead of generating it.",
+-  "Images you pass are used as the source to edit, or as references for style and subject.",
++  "Images you pass are used as the source to edit, or as references for style and subject. You can pass up to 8 images per call (PNG, JPEG, WebP, or GIF, each up to 20 MB).",
+   "Each call makes one image. For several images, call it once per image.",
++  "The image is saved to `path` when given — its extension is replaced with the image's real format and an existing file is overwritten — and otherwise to a new file in the session's temp folder.",
+   "It runs in the background: the call starts a job and returns right away, and you are notified automatically when the image is saved, with its path. Never poll, sleep, or check for the file while you wait.",
+   "Don't repeat a request unless the user asks.",
++  "Batching: preferred — every call starts a background job and returns immediately, so several calls in one block generate their images in parallel. Put one call per image in the same block instead of waiting for each completion notice.",
+ ].join("\n")
+ 
+ export const Input = Schema.Struct({
+diff --git a/packages/core/src/tool/plugin/mcp-resource.ts b/packages/core/src/tool/plugin/mcp-resource.ts
+index 9cf20e4..bb7ccb1 100644
+--- a/packages/core/src/tool/plugin/mcp-resource.ts
++++ b/packages/core/src/tool/plugin/mcp-resource.ts
+@@ -19,7 +19,7 @@ export const Plugin = {
+           name: "list_mcp_resources",
+           options: { namespace: "opencode", codemode: true },
+           description:
+-            "List documents, records, and other data exposed by MCP servers. Use this when the user refers to something that is not a local file, such as a URI with a custom scheme, then load a match with read_mcp_resource. Each entry names the server to read it from. Templates are resources addressed by a parameter such as a record ID; fill in the uriTemplate placeholders before reading.",
++            "List documents, records, and other data exposed by MCP servers.\n\nDetails:\n- Use this when the user refers to something that is not a local file, such as a URI with a custom scheme, then load a match with read_mcp_resource.\n- Omit `server` to list every configured server, or pass one server name to list only that server.\n- Each entry names the server to read it from.\n- Templates are resources addressed by a parameter such as a record ID; fill in the uriTemplate placeholders before reading.\n\nBatching: preferred — listing is read-only, so batch it with other independent calls. A read_mcp_resource call for a resource you have not discovered yet depends on this call's result: list first, then read in a later step.",
+           input: Schema.Struct({
+             server: Schema.optionalKey(
+               Schema.String.annotate({ description: "MCP server name as configured. Omit to list every server." }),
+@@ -49,7 +49,7 @@ export const Plugin = {
+           name: "read_mcp_resource",
+           options: { namespace: "opencode", codemode: true },
+           description:
+-            "Read one MCP resource by server and URI. Not for local files. Always return the full contents rather than slicing or filtering them; oversized output is truncated automatically and the full content is saved to a file you can read. Images and PDFs are shown to you directly.",
++            "Read one MCP resource by server and URI. Not for local files.\n\nDetails:\n- `server` and `uri` come from list_mcp_resources (a listed entry, or a uriTemplate with its placeholders filled in), or directly from the user.\n- Always return the full contents rather than slicing or filtering them; oversized output is truncated automatically and the full content is saved to a file you can read.\n- Images and PDFs are shown to you directly.\n- If the server is not connected or does not expose resources, the call fails with an explanation.\n\nBatching: batch reads of different resources freely — they are independent and run in parallel. If the URI is not known yet, list_mcp_resources must complete in an earlier step first.",
+           input: Schema.Struct({
+             server: Schema.String.annotate({
+               description: "The server field of the discovered resource.",
+diff --git a/packages/core/src/tool/plugin/opencode.ts b/packages/core/src/tool/plugin/opencode.ts
+index bfd091e..79b7b80 100644
+--- a/packages/core/src/tool/plugin/opencode.ts
++++ b/packages/core/src/tool/plugin/opencode.ts
+@@ -114,12 +114,12 @@ export const Plugin = {
+         draft.namespace({
+           name: "opencode",
+           description:
+-            "Tools for managing OpenCode itself, such as working with sessions and worktrees, searching the available models, and reading MCP resources.",
++            "Tools for managing OpenCode itself, such as working with sessions and worktrees, searching the available models, and reading MCP resources.\n\nBatching: the read-only tools in this namespace (models, worktree_list, schedule_list, artifact_read, list_mcp_resources, read_mcp_resource) batch freely with any other independent calls. Sequence state-changing calls that target the same session, worktree, schedule, or artifact.",
+         })
+         draft.add({
+           name: "session_rename",
+           description:
+-            "Rename a session, or omit sessionID to rename the current session. Use a short, specific title that summarizes the work being done.",
++            "Rename a session, or omit sessionID to rename the current session.\n\nDetails:\n- Use a short, specific title that summarizes the work being done.\n- The title is trimmed and must not be empty.\n\nBatching: batch renames of different sessions freely. Rename any one session only once per block — parallel renames of the same session apply in an unspecified order, and only the last one survives.",
+           input: RenameInput,
+           output: RenameOutput,
+           options: { namespace: "opencode", codemode: true },
+@@ -139,7 +139,7 @@ export const Plugin = {
+         draft.add({
+           name: "session_move",
+           description:
+-            "Move a session to another directory, or omit sessionID to move the current session. The current session moves at the next safe boundary; do not run destination-dependent tools in the same execute call.",
++            "Move a session to another directory, or omit sessionID to move the current session.\n\nDetails:\n- `directory` is resolved relative to the target session's directory and supports ~. Moving a session outside the project requires external-directory approval, unless the destination lies inside one of the project's own worktrees.\n- The current session moves at the next safe boundary; do not run destination-dependent tools in the same execute call.\n\nBatching: sequential for the current session — issue its move on its own, and do destination-dependent work in later steps once the move has taken effect. Moves of different sessions can be batched with each other.",
+           input: MoveInput,
+           output: MoveOutput,
+           options: { namespace: "opencode", codemode: true, pinned: true },
+@@ -175,7 +175,7 @@ export const Plugin = {
+         })
+         draft.add({
+           name: "worktree_create",
+-          description: "Create a named worktree. Returns its directory.",
++          description: "Create a named worktree. Returns its directory.\n\nBatching: batch creation of worktrees with different names freely. Work that uses the new worktree — session_move into it, or reading and editing its files — depends on the returned directory, so do it in a later step.",
+           input: WorktreeCreateInput,
+           output: Worktree.Info,
+           options: { namespace: "opencode", codemode: true, pinned: true },
+@@ -189,7 +189,7 @@ export const Plugin = {
+         })
+         draft.add({
+           name: "worktree_list",
+-          description: "List a repository's worktrees.",
++          description: "List a repository's worktrees.\n\nThe result gives each worktree's directory — the value worktree_remove expects.\n\nBatching: preferred — this is a read-only lookup, so batch it freely. When you need a directory for worktree_remove and do not have it yet, list first and remove in a later step.",
+           input: Schema.Struct({}),
+           output: Schema.Struct({ worktrees: Worktree.List }),
+           options: { namespace: "opencode", codemode: true, pinned: true },
+@@ -202,7 +202,7 @@ export const Plugin = {
+         draft.add({
+           name: "worktree_remove",
+           description:
+-            "Remove a worktree. The repository location selects configuration; directory identifies the worktree to remove.",
++            "Remove a worktree. The repository location selects configuration; directory identifies the worktree to remove.\n\nDetails:\n- Removing a worktree deletes its files, so it requires the same approval as editing them.\n- It fails if the directory does not exist or is not a worktree of this project (use worktree_list to see the project's worktrees), and if the worktree has modified or untracked files — unless force is true, which discards those files. Only set force when the user has confirmed forced removal.\n\nBatching: batch removals of different worktrees freely. Never batch a removal with calls that work in that worktree (session_move into it, reads, edits, shell commands there): the removal deletes its files while the other calls run.",
+           input: WorktreeRemoveInput,
+           output: WorktreeRemoveOutput,
+           options: { namespace: "opencode", codemode: true, pinned: true, permission: "edit" },
+@@ -234,7 +234,7 @@ export const Plugin = {
+         draft.add({
+           name: "models",
+           description:
+-            "Search the models available to use. Use this to turn a model name the user mentions into an exact reference for a tool that takes a model. Check your own provider first.",
++            "Search the models available to use. Use this to turn a model name the user mentions into an exact reference for a tool that takes a model. Check your own provider first.\n\nDetails:\n- `query` matches model names and IDs; `provider` filters by provider ID or name. Your own provider's models are listed first, newest first within each provider.\n- `type` defaults to \"chat\"; use \"image\" for image models. Only the newest version of each model family is shown unless all is true.\n- Results are paged: `limit` defaults to 20 (maximum 100); the result's `total` and `next` tell you whether more pages exist — pass `offset` to fetch the next one.\n- Each entry gives the exact \"providerID/modelID\" reference, its release date, variants, and cost.\n\nBatching: preferred — a read-only lookup, so batch it with other independent calls. A call that needs an exact model reference (for example subagent's `model`) depends on this result and belongs in a later step.",
+           input: ModelsInput,
+           output: ModelsOutput,
+           options: { namespace: "opencode", codemode: true },
+diff --git a/packages/core/src/tool/plugin/question.ts b/packages/core/src/tool/plugin/question.ts
+index b75a035..376638a 100644
+--- a/packages/core/src/tool/plugin/question.ts
++++ b/packages/core/src/tool/plugin/question.ts
+@@ -15,10 +15,17 @@ export const description = `Use this tool when you need to ask the user question
+ 3. Get decisions on implementation choices as you work
+ 4. Offer choices to the user about what direction to take.
+ 
++How it works:
++- The call waits until the user answers, then returns every question together with its answers.
++- Put all of your questions into the single \`questions\` array of one call (see Batching).
++- If the user dismisses the questions without answering, the step ends — unless the dismissal carries a message, which is returned to you as feedback so you can continue working.
++
+ Usage notes:
+ - A "Type your own answer" option is added automatically; don't include a separate option for free form answers
+ - Set \`multiple: true\` to allow selecting more than one option
+-- If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label`
++- If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label
++
++Batching: sequential — make one question call per block. Several question calls in one block would present competing prompts at the same time; a single call with several questions asks them together. Other independent calls in the same block still run while you wait for the answers, but anything that needs the answers must wait for the next step.`
+ 
+ export const Input = Schema.Struct({
+   questions: Schema.Array(Question.Prompt).check(Schema.isNonEmpty()).annotate({ description: "Questions to ask" }),
+diff --git a/packages/core/src/tool/plugin/read.ts b/packages/core/src/tool/plugin/read.ts
+index c1039c8..ca30148 100644
+--- a/packages/core/src/tool/plugin/read.ts
++++ b/packages/core/src/tool/plugin/read.ts
+@@ -46,7 +46,7 @@ export const Plugin = {
+           name,
+           options: { codemode: false },
+           description:
+-            "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
++            "Read the contents of a file or directory.\n\nWhat you get:\n- Text files: each line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference only and is not part of the file content — never copy it into edit or write calls.\n- Images and PDFs: presented directly to the model.\n- Directories: entries are returned one per line.\n- A path that does not exist fails; when similar names exist, the error suggests them.\n\nReading in sections:\n- Use offset and limit to read large files or directories in sections. offset is 1-based; limit defaults to 2000 and is capped at 2000.\n- Prefer one larger read over many small slices, and use grep to find specific content in large files.\n- Reading a file inside the project also loads any AGENTS.md files between the file's directory and the project root as session instructions.\n\nBatching: preferred — read is read-only and takes no locks, so batch independent reads (different files, or different sections of one file) in a single block to run them in parallel. Do not batch a read of a file with an edit, write, or patch to that same file in the same block when the read must reflect the change: calls in a block run concurrently with no ordering guarantee, so the read can return the content from before the change.",
+           input: Input,
+           output: Output,
+           execute: (input, context) => {
+diff --git a/packages/core/src/tool/plugin/schedule.ts b/packages/core/src/tool/plugin/schedule.ts
+index 7b17f77..5d51723 100644
+--- a/packages/core/src/tool/plugin/schedule.ts
++++ b/packages/core/src/tool/plugin/schedule.ts
+@@ -78,7 +78,7 @@ export const Plugin = {
+         editor.add({
+           name: "schedule_create",
+           description:
+-            "Schedule a prompt that wakes this session later: once after a delay, at a time, every interval, on a cron, or gated by an `if` / `until` shell (`{ run }`) or Code Mode (`{ code }`) check. Returns the schedule with its next run (or `done` immediately if `until` already matches).",
++            "Schedule a prompt that wakes this session later: once after a delay, at a time, every interval, on a cron, or gated by an `if` / `until` shell (`{ run }`) or Code Mode (`{ code }`) check.\n\nDetails:\n- The schedule belongs to this session and wakes this session when it fires.\n- Returns the schedule with its next run (or `done` immediately if `until` already matches).\n\nBatching: batch the creation of independent schedules freely — every call creates its own schedule and returns its ID. schedule_pause, schedule_resume, and schedule_delete need that ID, so they belong in a later step.",
+           input: Schedule.Request,
+           output: View,
+           options: { namespace: "opencode", codemode: true },
+@@ -95,7 +95,7 @@ export const Plugin = {
+         })
+         editor.add({
+           name: "schedule_list",
+-          description: "List this session's schedules with their status and next run, and the current time.",
++          description: "List this session's schedules with their status and next run, and the current time.\n\nBatching: preferred — a read-only lookup, so batch it freely. It is also how you get schedule IDs: pausing, resuming, or deleting a schedule you have not listed yet belongs in a later step.",
+           input: Schema.Struct({}),
+           output: ListOutput,
+           options: { namespace: "opencode", codemode: true },
+@@ -112,7 +112,7 @@ export const Plugin = {
+         })
+         editor.add({
+           name: "schedule_pause",
+-          description: "Pause a schedule. It keeps its settings and does not fire until resumed.",
++          description: "Pause a schedule. It keeps its settings and does not fire until resumed.\n\nBatching: batch pauses of different schedules freely (IDs come from schedule_list). Operations on the same schedule are state transitions: issue one per block — pause, resume, or delete it in separate, ordered steps.",
+           input: IDInput,
+           output: View,
+           options: { namespace: "opencode", codemode: true },
+@@ -126,7 +126,7 @@ export const Plugin = {
+         editor.add({
+           name: "schedule_resume",
+           description:
+-            "Resume a paused schedule. A one-shot that fell due while paused fires once now; a repeating one resumes at its next slot.",
++            "Resume a paused schedule. A one-shot that fell due while paused fires once now; a repeating one resumes at its next slot.\n\nBatching: batch resumes of different schedules freely (IDs come from schedule_list). Operations on the same schedule are state transitions: issue one per block — pause, resume, or delete it in separate, ordered steps.",
+           input: IDInput,
+           output: View,
+           options: { namespace: "opencode", codemode: true },
+@@ -139,7 +139,7 @@ export const Plugin = {
+         })
+         editor.add({
+           name: "schedule_delete",
+-          description: "Delete a schedule for good.",
++          description: "Delete a schedule for good. It never fires again, and its settings are not kept.\n\nBatching: batch deletions of different schedules freely (IDs come from schedule_list). Operations on the same schedule are state transitions: issue one per block — pause, resume, or delete it in separate, ordered steps.",
+           input: IDInput,
+           output: RemoveOutput,
+           options: { namespace: "opencode", codemode: true },
+diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
+index d433087..72731e5 100644
+--- a/packages/core/src/tool/plugin/shell.ts
++++ b/packages/core/src/tool/plugin/shell.ts
+@@ -35,12 +35,13 @@ const description = (shell?: string) =>
+   [
+     "Execute a shell command and return its output.",
+     ...(shell ? [`Commands run on ${OS} using ${shell}.`] : []),
++    "Each call runs as its own process in the given `workdir` (default: the current working directory). Calls do not share process state: a `cd` or environment change inside one command does not carry into any other call.",
+     "Quote file paths containing spaces or special characters.",
+     "Prefer dedicated tools over shell commands when possible.",
+-    "When output is large, the full result is saved to a file and a truncated preview is returned.",
+-    "Rely on automatic truncation unless filtering the output is more useful.",
+-    "Commands accept an optional timeout, background commands have no timeout by default.",
+-    "Background commands return immediately, and you will be notified when they complete.",
++    "Timeouts: `timeout` is in milliseconds and 0 disables it. Foreground commands default to a 120000 ms timeout; background commands have no timeout by default.",
++    "When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful.",
++    "Background commands (background: true) return immediately with a shell ID while their output streams to a file, and you will be notified when they complete. Do not poll for completion.",
++    "Batching: batch independent commands in one block — they run in parallel as separate processes. Run commands sequentially when one consumes another command's output or files, or when they modify the same files or other shared state. Start long-running commands in the background instead of blocking on them.",
+   ].join(" ")
+ 
+ export const Input = Schema.Struct({
+diff --git a/packages/core/src/tool/plugin/skill.ts b/packages/core/src/tool/plugin/skill.ts
+index 122ec1f..8405408 100644
+--- a/packages/core/src/tool/plugin/skill.ts
++++ b/packages/core/src/tool/plugin/skill.ts
+@@ -21,7 +21,11 @@ export const Output = Schema.Struct({
+ export const description = [
+   "Load a specialized skill's instructions and resources into the current conversation when the task at hand matches its description.",
+   "",
+-  "The skill ID must match an available skill or a skill explicitly referenced by the user.",
++  "Details:",
++  "- The skill ID must match an available skill or a skill explicitly referenced by the user. An unknown ID fails.",
++  "- On success, the skill's instructions are added to the conversation, and the result names the skill and its directory.",
++  "",
++  "Batching: batch calls for different skills freely — each skill loads independently and the calls run in parallel. Call any one skill once; loading it twice in one block adds nothing.",
+ ].join("\n")
+ 
+ export const toModelOutput = Skill.toModelOutput
+diff --git a/packages/core/src/tool/plugin/subagent.ts b/packages/core/src/tool/plugin/subagent.ts
+index 669711d..f16c98d 100644
+--- a/packages/core/src/tool/plugin/subagent.ts
++++ b/packages/core/src/tool/plugin/subagent.ts
+@@ -59,6 +59,8 @@ export const description = [
+   "Foreground (default) runs the subagent to completion and returns its final response.",
+   "Background mode (background=true) launches it asynchronously and returns immediately; you are notified when it finishes.",
+   "Use background only for independent work that can run while you continue elsewhere.",
++  "Limits: the named agent must be allowed to run as a subagent (primary agents cannot), a sessionID you continue must be a child session of the current session, and nesting is capped by the configured subagent depth limit (default: 1). Calls that break these rules fail with an explanation.",
++  "Batching: batch subagent calls for independent tasks — foreground calls in one block run concurrently, each in its own child session, and background calls return immediately. Sequence calls that continue the same sessionID, since each follow-up builds on the previous result, and do not run subagents in parallel on the same files or topics.",
+ ].join("\n")
+ 
+ export const Plugin = {
+diff --git a/packages/core/src/tool/plugin/webfetch.ts b/packages/core/src/tool/plugin/webfetch.ts
+index 5640782..7ea8c19 100644
+--- a/packages/core/src/tool/plugin/webfetch.ts
++++ b/packages/core/src/tool/plugin/webfetch.ts
+@@ -17,7 +17,13 @@ export const MAX_TIMEOUT_SECONDS = 120
+ 
+ export const description = `Fetch content from an HTTP or HTTPS URL and return it as text, markdown, or HTML. Markdown is the default.
+ 
+-Use a more targeted tool when one is available. This tool is read-only. Large text results may be replaced with a preview while the complete output is retained in managed storage.`
++Details:
++- The URL must not contain credentials. Redirects are followed (up to 10), and each redirect target is checked against the permission rules before being fetched.
++- \`timeout\` is in seconds: default 30, maximum 120.
++- Use a more targeted tool when one is available. This tool is read-only.
++- Large text results may be replaced with a preview while the complete output is retained in managed storage.
++
++Batching: preferred — fetches are independent and read-only, so batch several URLs in one block to fetch them in parallel. Fetch sequentially only when a later URL depends on what an earlier fetch returned.`
+ 
+ const Timeout = Schema.Finite.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(MAX_TIMEOUT_SECONDS))
+ 
+diff --git a/packages/core/src/tool/plugin/websearch.ts b/packages/core/src/tool/plugin/websearch.ts
+index d3e2c91..29089ed 100644
+--- a/packages/core/src/tool/plugin/websearch.ts
++++ b/packages/core/src/tool/plugin/websearch.ts
+@@ -19,7 +19,13 @@ const httpErrors = new Map([
+ 
+ export const description = `Search the web using the user's selected search integration. Use this for current information beyond knowledge cutoff.
+ 
+-The current year is ${new Date().getFullYear()}. Use this year when searching for recent information or current events.`
++Details:
++- If no search provider has been selected yet, the first search may ask the user to allow web search and choose a provider.
++- A search that matches nothing returns "No search results found. Please try a different query." Rate-limit (HTTP 429) and authentication (HTTP 401) failures are returned as errors.
++
++The current year is ${new Date().getFullYear()}. Use this year when searching for recent information or current events.
++
++Batching: preferred for independent queries — batch several searches in one block to run them in parallel. Sequence a search when its query depends on an earlier search's results.`
+ 
+ export const Input = Schema.Struct({
+   query: Schema.String.annotate({ description: "Websearch query" }),
+diff --git a/packages/core/src/tool/plugin/write.ts b/packages/core/src/tool/plugin/write.ts
+index 7d04595..59a81eb 100644
+--- a/packages/core/src/tool/plugin/write.ts
++++ b/packages/core/src/tool/plugin/write.ts
+@@ -48,7 +48,7 @@ export const Plugin = {
+           name,
+           options: { codemode: false, permission: "edit" },
+           description:
+-            "Writes a file to the local filesystem, overwriting if one exists.\n\nMissing parent directories are created automatically.\n\nUse this tool to create new files or overwrite existing files. For partial changes, use the edit tool instead.",
++            "Writes a file to the local filesystem, overwriting if one exists.\n\nDetails:\n- The whole file is replaced by `content`. Missing parent directories are created automatically.\n- An existing UTF-8 BOM is preserved, and a formatter runs on the file after writing.\n- Use this tool to create new files or overwrite existing files. For partial changes, use the edit tool instead.\n\nBatching: batch writes to different files freely — calls in one block run in parallel. Never batch two writes to the same file: every call replaces the whole file, same-file calls complete in an unspecified order, and only one of them survives. Write the file once; make further changes with edit in a later step.",
+           input: Input,
+           output: Output,
+           execute: (input, context) =>
+diff --git a/packages/core/src/tool/todowrite.txt b/packages/core/src/tool/todowrite.txt
+index 0e27a92..83e63b6 100644
+--- a/packages/core/src/tool/todowrite.txt
++++ b/packages/core/src/tool/todowrite.txt
+@@ -1,7 +1,13 @@
+ Create and update a todo list for the current session. The user sees it as your working plan.
+ 
+-Use it proactively when a task has 3 or more distinct steps, or when the user gives several tasks or asks for a todo list. Skip it for a single simple task or a purely conversational request. When in doubt, use it.
++When to use it:
++- Use it proactively when a task has 3 or more distinct steps, or when the user gives several tasks or asks for a todo list.
++- Skip it for a single simple task or a purely conversational request. When in doubt, use it.
+ 
+-- Send the full list on every call; it replaces the previous one.
++How it works:
++- Send the full list on every call; it replaces the previous one. There is no partial update — items you leave out are removed.
++- Each item pairs a brief `content` description with a `status`: pending, in_progress, completed, or cancelled.
+ - Mark items `in_progress` when you start them and `completed` as soon as they're actually done.
+-- Only call it when the list changes.
++- Only call it when the list changes. The result echoes the full list with per-status counts.
++
++Batching: sequential — issue at most one todowrite call per block. Every call replaces the entire list, so two calls in one block race: whichever finishes last wins and the other update is lost. Make the next todowrite call in a later step, once the work it records has happened.
+diff --git a/packages/core/test/tool-execute.test.ts b/packages/core/test/tool-execute.test.ts
+index a745494..2d388f4 100644
+--- a/packages/core/test/tool-execute.test.ts
++++ b/packages/core/test/tool-execute.test.ts
+@@ -49,6 +49,7 @@ test("execute describes invariant Code Mode behavior", () => {
+       'Call tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>["tool-name"](input)`.',
+       "Prefer an explicit `return`; if omitted, the final top-level expression becomes the result.",
+       "Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.",
++      "Batching: one execute call is already a script — inside it, sequence dependent calls with await and run independent calls concurrently with Promise.allSettled. Prefer a single execute call per block. Several execute calls in one block run as separate programs in parallel, and file-changing calls they make to the same file are serialized under that file's lock in an unspecified order, so keep same-file work inside one program.",
+     ].join("\n"),
+   )
+ })
