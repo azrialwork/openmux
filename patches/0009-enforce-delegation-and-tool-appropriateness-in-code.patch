@@ -1,0 +1,1372 @@
+diff --git a/packages/core/src/plugin/agent-prompt/build.txt b/packages/core/src/plugin/agent-prompt/build.txt
+index 932e52f..27ebea8 100644
+--- a/packages/core/src/plugin/agent-prompt/build.txt
++++ b/packages/core/src/plugin/agent-prompt/build.txt
+@@ -1,4 +1,4 @@
+-You are the Build agent, the default primary agent in OpenCode, a coding agent harness. You work directly with the user to accomplish their goals, and you have the full tool set: you can read, search, edit and write files, run shell commands, fetch web content, and delegate work to subagents.
++You are the Build agent, the default primary agent in OpenCode, a coding agent harness. You work directly with the user to accomplish their goals: you can read files whose path is already known, edit and write files, run shell commands, fetch web content, and delegate work to subagents. You have no glob or grep tools — finding files and searching code is the Explore subagent's work, and the harness enforces that division in code, as described below.
+ 
+ # Harness
+ - Responses are rendered as GitHub-flavored Markdown.
+@@ -18,12 +18,14 @@ How to delegate well:
+ - Do not delegate work that is quicker to do yourself: a single known file to read, one small edit, or anything that needs the user's answer — use the question tool yourself instead.
+ - A subagent's result comes back to you as a tool result. You stay responsible for it: check it against the codebase before building on it, and synthesize across subagents yourself.
+ 
++The delegation boundary is enforced in code, not just described here. You have no glob and grep tools at all, so every search goes through Explore. For reads, each user turn gives you a small direct-read budget enforced by the harness: after a few direct exploration calls it reminds you to delegate, and when the budget is spent it removes every tool except subagent and question from your tool list until a delegation completes. The budget refills only when a delegation completes and returns a result — a delegation that is still running, fails, or does no real work refills nothing. Spend the budget on files you already know you need, and delegate the moment the work becomes a search.
++
+ # Working directly
+-- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do what you need. Do not chain shell commands with separators like `echo "====";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse.
++- Use the shell to run programs: builds, tests, git, and commands that have no dedicated tool. Shell commands for reading, finding, or searching files (such as cat, head, tail, ls, find, grep) and for editing files in place (sed -i, output redirection into files) are blocked in code; the denial names the tool to use instead, so follow it rather than looking for a way around. Do not chain shell commands with separators like `echo "====";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse.
+ - Use the write tool to create files or completely replace their content. Prefer the edit tool for targeted changes: it replaces the exact text in `oldString` with `newString`, the values must differ, and by default `oldString` must occur exactly once — include more surrounding context to make it unique, or set `replaceAll` to true to replace every occurrence.
+ - Batch independent tool calls in one block; they run concurrently. Sequence calls that depend on each other's results, and sequence edits to the same file: parallel edits to one file are serialized by the harness in an unspecified order.
+ - Use the todowrite tool to plan and track work with three or more distinct steps.
+-- Your built-in permissions allow every tool; the one standing guardrail is that reading `.env` files asks the user for approval first. When a call is denied, do not try to route around the denial — adjust the approach or ask the user.
++- Your built-in permissions deny glob and grep outright (they are absent from your tool list, including in Code Mode) and block the shell substitutions described above; reading `.env` files asks the user for approval first. When a call is denied, do not try to route around the denial — adjust the approach or ask the user.
+ 
+ # Communication
+ - Use clear file paths when referring to files.
+diff --git a/packages/core/src/plugin/agent-prompt/general.txt b/packages/core/src/plugin/agent-prompt/general.txt
+index d8b0f6b..1f664ce 100644
+--- a/packages/core/src/plugin/agent-prompt/general.txt
++++ b/packages/core/src/plugin/agent-prompt/general.txt
+@@ -11,8 +11,8 @@ You are the General agent, a general-purpose subagent in OpenCode, a coding agen
+ - Your final response is the only output the caller receives. Make it complete and self-contained: the answer or the work performed, the files you changed (as absolute paths), and anything the caller needs to verify or continue. Do not end with questions or promises of follow-up work.
+ 
+ # Working
+-- You have the same tool access as the primary agent: read, search, edit and write files, run shell commands, and fetch web content. Reading `.env` files asks for approval first; when a call is denied, do not try to route around the denial — work around the gap and report it in your result.
+-- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do what you need. Do not chain shell commands with separators like `echo "====";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse.
++- You have the full file tool set: read, glob, grep, edit and write files, run shell commands, and fetch web content. Reading `.env` files asks for approval first; when a call is denied, do not try to route around the denial — work around the gap and report it in your result.
++- Use the shell to run programs: builds, tests, git, and commands that have no dedicated tool. Shell commands for reading, finding, or searching files (such as cat, head, tail, ls, find, grep) and for editing files in place (sed -i, output redirection into files) are blocked in code; the denial names the tool to use instead, so follow it rather than looking for a way around. Do not chain shell commands with separators like `echo "====";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse.
+ - Use the write tool to create files or completely replace their content. Prefer the edit tool for targeted changes: it replaces the exact text in `oldString` with `newString`, the values must differ, and by default `oldString` must occur exactly once — include more surrounding context to make it unique, or set `replaceAll` to true to replace every occurrence.
+ - Batch independent tool calls in one block; they run concurrently. Sequence calls that depend on each other's results, and sequence edits to the same file: parallel edits to one file are serialized by the harness in an unspecified order.
+ - Use the todowrite tool to plan and track work with three or more distinct steps.
+diff --git a/packages/core/src/plugin/agent-prompt/plan.txt b/packages/core/src/plugin/agent-prompt/plan.txt
+index 97054ba..ad4183c 100644
+--- a/packages/core/src/plugin/agent-prompt/plan.txt
++++ b/packages/core/src/plugin/agent-prompt/plan.txt
+@@ -7,9 +7,9 @@ You are the Plan agent, a primary agent in OpenCode, a coding agent harness. You
+ 
+ # What you may and may not do
+ Your restrictions are enforced by your permissions in code, not just by this prompt:
+-- Reading and searching are open to you: read, glob, grep, webfetch, websearch, and read-only lookups such as listing worktrees, schedules, and artifacts.
++- You may read files whose path is already known with the read tool, and use webfetch, websearch, and read-only lookups such as listing worktrees, schedules, and artifacts. You have no glob or grep tools: finding files and searching code goes through the Explore subagent.
+ - Editing is denied everywhere except one directory: the Plan directory named in the Plan mode reminder. The edit, write, and patch tools all check the same `edit` permission, so no tool gives you a way around this.
+-- The shell tool is denied. Explore with the dedicated search and read tools instead.
++- The shell tool is denied. Explore with the read tool and the Explore subagent instead.
+ - Also denied: generating images, creating worktrees, creating or changing schedules, and creating, updating, or deleting artifacts.
+ - Do not create or update plan files unless the user explicitly asks you to. When they do, write them only in the Plan directory.
+ - If the user asks you to implement changes, do not do so. Tell them they need to switch agents (for example to Build).
+@@ -21,6 +21,8 @@ Explore is the only subagent you can call — your permissions deny the subagent
+ 
+ Brief each subagent completely: a new subagent starts with fresh context and sees only the prompt you give it. You stay responsible for the result — check findings against the codebase and fold them into the plan yourself.
+ 
++The harness enforces this division with a per-turn budget on your direct reads: after a few direct reads it reminds you to delegate, and when the budget is spent it removes every tool except subagent and question from your tool list until a delegation to Explore completes. The budget refills only when that delegation completes and returns a result — one that is still running, fails, or does no real work refills nothing. Spend the budget on files you already know you need, and delegate the moment the work becomes a search.
++
+ # How to work
+ - Explore before you propose: base every plan on what the code actually contains, and say plainly what you could not verify.
+ - Use the question tool to resolve open decisions with the user instead of guessing on anything that changes the shape of the work.
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+index c4bc39b..bd743cb 100644
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -3,6 +3,7 @@ export * as AgentPlugin from "./agent.js"
+ import { define } from "@opencode/plugin/effect/plugin"
+ import { Effect } from "effect"
+ import { Agent } from "../agent.js"
++import { Permission } from "../permission.js"
+ import PROMPT_BUILD from "./agent-prompt/build.txt"
+ import PROMPT_GENERAL from "./agent-prompt/general.txt"
+ import PROMPT_EXPLORE from "./agent-prompt/explore.txt"
+@@ -40,6 +41,30 @@ Rules:
+ - If the conversation ends with an unanswered question to the user, preserve that exact question
+ - If the conversation ends with an imperative statement or request to the user (e.g. "Now please run the command and paste the console output"), always include that exact request in the summary`
+ 
++// Shell segments whose work belongs to a dedicated tool. The shell tool parses each command
++// and asserts permission per segment, so a pattern blocks its segment wherever it appears in
++// a compound command; the tool-policy plugin rewrites the denial into guidance naming the
++// designated tool. Reading, finding, and searching files — and editing them in place — go
++// through read, glob, grep, and edit/write/patch instead of the shell.
++const shellHygiene: Permission.Ruleset = [
++  { action: "shell", resource: "cat *", effect: "deny" },
++  { action: "shell", resource: "head *", effect: "deny" },
++  { action: "shell", resource: "tail *", effect: "deny" },
++  { action: "shell", resource: "less *", effect: "deny" },
++  { action: "shell", resource: "more *", effect: "deny" },
++  { action: "shell", resource: "ls *", effect: "deny" },
++  { action: "shell", resource: "find *", effect: "deny" },
++  { action: "shell", resource: "tree *", effect: "deny" },
++  { action: "shell", resource: "grep *", effect: "deny" },
++  { action: "shell", resource: "rg *", effect: "deny" },
++  { action: "shell", resource: "ag *", effect: "deny" },
++  { action: "shell", resource: "ack *", effect: "deny" },
++  { action: "shell", resource: "sed -i *", effect: "deny" },
++  { action: "shell", resource: "sed --in-place*", effect: "deny" },
++  { action: "shell", resource: "echo * > *", effect: "deny" },
++  { action: "shell", resource: "printf * > *", effect: "deny" },
++]
++
+ export const Plugin = define({
+   id: "opencode.agent",
+   effect: Effect.fn(function* (ctx) {
+@@ -48,8 +73,19 @@ export const Plugin = define({
+         item.name = Agent.Name.make("Build")
+         item.description = "The default agent. Executes tools based on configured permissions."
+         item.mode = "primary"
++        // A loop backstop only: far above any observed turn, it guarantees a runaway
++        // tool-call loop ends the turn instead of spinning until the context is gone.
++        item.steps = 100
+         item.system = PROMPT_BUILD
+         item.permissions.push({ action: "question", resource: "*", effect: "allow" })
++        item.permissions.push(...shellHygiene)
++        // Discovery belongs to the Explore subagent. As the last word on their actions, a
++        // whole-tool deny removes glob and grep from Build's tool catalog and Code Mode
++        // inventory alike; Build keeps read for files whose path is already known.
++        item.permissions.push(
++          { action: "glob", resource: "*", effect: "deny" },
++          { action: "grep", resource: "*", effect: "deny" },
++        )
+       })
+ 
+       editor.update(Agent.ID.make("general"), (item) => {
+@@ -62,6 +98,8 @@ export const Plugin = define({
+           { action: "question", resource: "*", effect: "deny" },
+           { action: "subagent", resource: "*", effect: "deny" },
+         )
++        // General keeps its discovery tools; only its shell is fenced to the dedicated tools.
++        item.permissions.push(...shellHygiene)
+       })
+ 
+       editor.update(Agent.ID.make("explore"), (item) => {
+diff --git a/packages/core/src/plugin/internal.ts b/packages/core/src/plugin/internal.ts
+index defd91f..b548bb3 100644
+--- a/packages/core/src/plugin/internal.ts
++++ b/packages/core/src/plugin/internal.ts
+@@ -110,6 +110,7 @@ import { WebSearchPlugins } from "./websearch/index.js"
+ import { SkillPlugin } from "./skill.js"
+ import { VcsHgPlugin } from "./vcs/hg.js"
+ import { ToolInputRepairPlugin } from "./tool-input-repair.js"
++import { ToolPolicyPlugin } from "./tool-policy.js"
+ import { VcsGitPlugin } from "./vcs/git.js"
+ import { VerbosityPlugin } from "./verbosity.js"
+ import { WarmingPlugin } from "./warming.js"
+@@ -245,6 +246,7 @@ const pre = [
+   VcsGitPlugin.Plugin,
+   AgentPlugin.Plugin,
+   PlanPlugin.Plugin,
++  ToolPolicyPlugin.Plugin,
+   CommandPlugin.Plugin,
+   GoalPlugin.Plugin,
+   SkillPlugin.Plugin,
+diff --git a/packages/core/src/plugin/plan.ts b/packages/core/src/plugin/plan.ts
+index 6e39199..10e02d9 100644
+--- a/packages/core/src/plugin/plan.ts
++++ b/packages/core/src/plugin/plan.ts
+@@ -36,6 +36,9 @@ export const Plugin = define({
+         item.name = Agent.Name.make("Plan")
+         item.description = "Read-only agent for exploring the codebase and planning work before implementation."
+         item.mode = "primary"
++        // The same loop backstop as Build: a ceiling no real planning turn approaches,
++        // present so a runaway tool-call loop terminates instead of spinning.
++        item.steps = 100
+         item.system = PROMPT_PLAN
+         item.permissions.push({ action: "question", resource: "*", effect: "allow" })
+         item.permissions.push({ action: "edit", resource: "*", effect: "deny" })
+@@ -56,6 +59,11 @@ export const Plugin = define({
+         item.permissions.push({ action: "artifact_create", resource: "*", effect: "deny" })
+         item.permissions.push({ action: "artifact_update", resource: "*", effect: "deny" })
+         item.permissions.push({ action: "artifact_delete", resource: "*", effect: "deny" })
++        // Discovery belongs to the Explore subagent, as it does for Build: as the last word
++        // on their actions, a whole-tool deny removes glob and grep from Plan's tool catalog
++        // and Code Mode inventory alike. Plan keeps read for files whose path is known.
++        item.permissions.push({ action: "glob", resource: "*", effect: "deny" })
++        item.permissions.push({ action: "grep", resource: "*", effect: "deny" })
+       })
+     })
+ 
+diff --git a/packages/core/src/plugin/tool-policy.ts b/packages/core/src/plugin/tool-policy.ts
+new file mode 100644
+index 0000000..130e614
+--- /dev/null
++++ b/packages/core/src/plugin/tool-policy.ts
+@@ -0,0 +1,303 @@
++export * as ToolPolicyPlugin from "./tool-policy.js"
++
++import { Message, ToolFailure } from "@opencode/ai/effect"
++import { define } from "@opencode/plugin/effect/plugin"
++import { Agent } from "@opencode/schema/agent"
++import type { SessionContext } from "@opencode/plugin/effect/session"
++import { Effect, Predicate } from "effect"
++import { Permission } from "../permission.js"
++import { SubagentCompletion } from "../session/subagent-completion.js"
++
++// Code enforcement for the two behaviours the agent prompts alone did not produce (patch
++// 0009): primary agents delegate exploration instead of doing it all themselves, and every
++// tool is used for its designated job — the shell never substitutes for the dedicated file
++// tools. The fences themselves live in permissions (plugin/agent.ts, plugin/plan.ts); this
++// plugin adds the parts permissions cannot express: a per-turn exploration budget for Build
++// and Plan whose top rung removes every tool but subagent and question from the model's
++// view (delegation mode), refills earned only by delegations that complete with substance,
++// and denial messages that name the designated tool so the model can correct itself.
++
++/** Direct exploration calls per user turn that are always free: quick known-path lookups. */
++export const FREE_EXPLORATION_CALLS = 4
++/** The completed direct exploration call in a turn at which the delegation reminder is injected. */
++export const REMIND_AT = FREE_EXPLORATION_CALLS + 1
++/** Completed direct exploration calls allowed per user turn; at this count delegation mode begins. */
++export const MAX_EXPLORATION_CALLS = 8
++/** The shortest delegation prompt that counts as substantive work once the delegation completes. */
++export const MIN_DELEGATION_PROMPT_CHARS = 40
++
++const build = Agent.ID.make("build")
++const plan = Agent.ID.make("plan")
++const general = Agent.ID.make("general")
++
++const exploration = new Set(["read", "glob", "grep"])
++
++const reminder = `[system-reminder] You have made ${REMIND_AT} direct exploration calls this turn without delegating. Delegate remaining exploration to the Explore subagent, and independent multi-step work to General. Reads of files you already know remain available within a small remaining budget.`
++
++const budgetError = `Exploration budget for this turn is exhausted (${MAX_EXPLORATION_CALLS} direct calls). Use the \`subagent\` tool (agent: \`explore\`) for further exploration; the budget refills after a delegation.`
++
++const delegationModeDescription = `REQUIRED NEXT ACTION — your direct tool budget for this turn is exhausted. Delegate now: exploration to the Explore subagent, independent multi-step work to General. Your full tool set returns after a delegation completes.`
++
++interface State {
++  /** Exploration calls that completed this user turn; drives the ladder and delegation mode. */
++  exploration: number
++  /**
++   * Exploration attempts currently executing. Reserved in execute.before so one parallel
++   * block cannot overshoot the ladder, and returned in execute.after when an attempt errors,
++   * so failed calls never consume the budget.
++   */
++  inFlight: number
++  reminded: boolean
++  remindPending: boolean
++  userTurnsSeen: number
++  /**
++   * Background delegations launched with a qualifying prompt and target, keyed by child
++   * session id, awaiting the completion synthetic that settles their refill credit.
++   */
++  pendingBackground: Set<string>
++}
++
++const refill = (state: State) => {
++  state.exploration = 0
++  state.inFlight = 0
++  state.reminded = false
++  state.remindPending = false
++}
++
++// User-role transcript entries that are not user turns: harness synthetics and compaction
++// checkpoints arrive as user messages without a structural marker (see session/runner/
++// to-llm-message.ts), so they are recognised by their stable text prefixes, the same way
++// plan.ts recognises its own reminders.
++const syntheticPrefixes = ["[system-reminder", "<conversation-checkpoint>", "<subagent ", "<shell ", "Instructions from: "]
++
++const textOf = (message: Message) =>
++  message.content
++    .filter((part) => part.type === "text")
++    .map((part) => part.text)
++    .join("")
++
++const isUserTurn = (message: Message) => {
++  if (message.role !== "user") return false
++  return !syntheticPrefixes.some((prefix) => textOf(message).startsWith(prefix))
++}
++
++const userTurns = (messages: SessionContext["messages"]) => messages.filter(isUserTurn).length
++
++// The first command word of a shell segment: environment assignments are skipped and a
++// path prefix is dropped, so `/usr/bin/cat` and `FOO=1 cat` both resolve to `cat`.
++const commandOf = (segment: string) => {
++  const word = segment
++    .trim()
++    .split(/\s+/)
++    .find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word))
++  return word?.replace(/^.*\//, "").replace(/^["']|["']$/g, "")
++}
++
++const guidance: ReadonlyArray<{
++  readonly commands: ReadonlySet<string>
++  readonly text: string
++  // Build has no glob/grep tools (patch 0009 removes them from the primaries' catalogs),
++  // so for Build the pointer must name the route it actually has: read what it knows,
++  // and delegate discovery to the Explore subagent.
++  readonly primaryText?: string
++}> = [
++  {
++    commands: new Set(["cat", "head", "tail", "less", "more"]),
++    text: "Use the `read` tool instead: it is the designated tool for reading file contents and returns numbered lines.",
++  },
++  {
++    commands: new Set(["ls", "find", "tree"]),
++    text: "Use the `glob` tool to find files by pattern, or the `read` tool on a directory to list it.",
++    primaryText:
++      "Use the `read` tool on a directory to list it. Finding files by pattern across the project is delegated work: use the `subagent` tool (agent: `explore`) — this agent has no `glob` tool.",
++  },
++  {
++    commands: new Set(["grep", "rg", "ag", "ack"]),
++    text: "Use the `grep` tool instead: it is the designated tool for searching file contents.",
++    primaryText:
++      "Searching file contents is delegated work: use the `subagent` tool (agent: `explore`) — this agent has no `grep` tool. Use the `read` tool for files whose path you already know.",
++  },
++  {
++    commands: new Set(["sed"]),
++    text: "Use the `edit` tool (or `write`/`patch`) instead: shell in-place editing is blocked.",
++  },
++]
++
++// Turns a shell denial caused by a hygiene rule into guidance naming the designated tool.
++// Returns undefined for denials the hygiene rules did not cause, leaving them untouched.
++const hygieneGuidance = (resources: ReadonlyArray<string>, agent: Agent.ID) => {
++  for (const resource of resources) {
++    const command = commandOf(resource)
++    if (!command) continue
++    if ((command === "echo" || command === "printf") && resource.includes(">"))
++      return `Shell command \`${command}\` is blocked for this agent. Use the \`write\` tool instead: shell redirection is blocked for writing files.`
++    const match = guidance.find((entry) => entry.commands.has(command))
++    if (match)
++      return `Shell command \`${command}\` is blocked for this agent. ${agent === build && match.primaryText ? match.primaryText : match.text}`
++  }
++  return undefined
++}
++
++// A delegation earns a refill only when it is substantive on its face: the target is a real
++// worker for the caller (Plan may only use Explore) and the briefing is long enough to
++// describe actual work. Whether it also completed is checked separately at settle time.
++const delegationQualifies = (caller: Agent.ID, input: unknown) => {
++  if (!Predicate.isObject(input)) return false
++  if (input.agent !== "explore" && !(caller === build && input.agent === "general")) return false
++  return typeof input.prompt === "string" && input.prompt.trim().length >= MIN_DELEGATION_PROMPT_CHARS
++}
++
++// The settled shape of a subagent tool call, read from its result: a foreground call that
++// ran to completion reports status "completed" with the child's output text; a launch —
++// background from the start, or a foreground call the user pushed to the background —
++// reports status "running" with the child session id and no output yet.
++const subagentOutcome = (result: unknown) => {
++  if (!Predicate.isObject(result)) return undefined
++  const output = result.output
++  if (!Predicate.isObject(output)) return undefined
++  const metadata = Predicate.isObject(result.metadata) ? result.metadata : undefined
++  const sessionID = typeof output.sessionID === "string" ? output.sessionID : metadata?.sessionID
++  return {
++    status: typeof output.status === "string" ? output.status : undefined,
++    output: typeof output.output === "string" ? output.output : undefined,
++    sessionID: typeof sessionID === "string" ? sessionID : undefined,
++  }
++}
++
++// Background completion synthetics are delivered to the parent as user messages of the form
++// `<subagent sessionID="..." state="...">` (session/subagent-completion.ts); the delivered
++// states are "completed", "error", and "cancelled".
++const completionPattern = /<subagent sessionID="([^"]+)" state="([^"]+)"/
++
++export const Plugin = define({
++  id: "opencode.tool.policy",
++  effect: Effect.fn(function* (ctx) {
++    const states = new Map<string, State>()
++    const stateFor = (sessionID: string): State => {
++      const current = states.get(sessionID)
++      if (current) return current
++      const next: State = {
++        exploration: 0,
++        inFlight: 0,
++        reminded: false,
++        remindPending: false,
++        userTurnsSeen: 0,
++        pendingBackground: new Set(),
++      }
++      states.set(sessionID, next)
++      return next
++    }
++
++    // Budget backstop. Counting happens on completion (the execute.after hook below); this
++    // hook only reserves a slot per attempt so a single parallel block — whose calls share
++    // one pre-built tools map and so cannot see each other's completions — cannot overshoot
++    // the ladder, and rejects calls once the turn's allowance is spoken for. Governance is
++    // decided from the payload alone and must never break a session, so the computation is
++    // total and fail-open: a blocked call is produced only by the explicit decision below,
++    // never by an incidental failure.
++    yield* ctx.tool.hook("execute.before", (event) =>
++      Effect.gen(function* () {
++        const blocked = yield* Effect.sync(() => {
++          if (event.agent !== build && event.agent !== plan) return undefined
++          if (!exploration.has(event.tool)) return undefined
++          const state = stateFor(event.sessionID)
++          if (state.exploration + state.inFlight >= MAX_EXPLORATION_CALLS) return budgetError
++          state.inFlight += 1
++          return undefined
++        }).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
++        if (blocked) return yield* new ToolFailure({ message: blocked })
++      }),
++    )
++
++    // One after hook does both jobs: budget accounting and delegation settlement for
++    // Build and Plan, and hygiene guidance for Build and General (their shell denials for
++    // reading, finding, searching, and in-place editing are rewritten into pointers to the
++    // designated tool; General is not budget-governed, but its shell carries the same
++    // hygiene denies).
++    yield* ctx.tool.hook("execute.after", (event) =>
++      Effect.sync(() => {
++        if (event.agent === build || event.agent === plan) {
++          const state = stateFor(event.sessionID)
++          if (exploration.has(event.tool)) {
++            state.inFlight = Math.max(0, state.inFlight - 1)
++            if (event.status === "completed") {
++              state.exploration += 1
++              if (state.exploration === REMIND_AT) state.remindPending = true
++            }
++          } else if (event.tool === "subagent" && event.status === "completed") {
++            const outcome = subagentOutcome(event.result)
++            if (outcome?.status === "running") {
++              // A launch settles nothing; it only records a credit the child's completion
++              // synthetic can later claim, and only if the delegation was substantive.
++              if (outcome.sessionID && delegationQualifies(event.agent, event.input))
++                state.pendingBackground.add(outcome.sessionID)
++            } else if (outcome?.status === "completed" && delegationQualifies(event.agent, event.input)) {
++              // A child that finished without saying anything did no delegable work.
++              const text = outcome.output?.trim()
++              if (text && text !== SubagentCompletion.NO_TEXT) refill(state)
++            }
++          }
++        }
++        if (event.agent !== build && event.agent !== general) return
++        if (event.status !== "error") return
++        if (event.tool !== "shell") return
++        if (!(event.error.error instanceof Permission.BlockedError)) return
++        const message = hygieneGuidance(event.error.error.resources, event.agent)
++        if (message) event.error = new ToolFailure({ message })
++      }).pipe(Effect.catchCause(() => Effect.void)),
++    )
++
++    // Turn tracking, background settlement, the delegation reminder, and delegation mode.
++    // A new user turn refills the budget; a pending reminder is spliced in once,
++    // ephemerally like the goal plugin's reminder, so it never persists into the transcript
++    // it comments on; and once the budget is spent, every tool but subagent and question is
++    // removed from the request's tools map — rebuilt from state on every request, so the
++    // full set returns on its own after a refill or a new turn.
++    yield* ctx.session.hook("context", (event) =>
++      Effect.sync(() => {
++        if (event.agent !== build && event.agent !== plan) return
++        const state = stateFor(event.sessionID)
++        // A context request is prepared between steps, when the previous step's calls have
++        // settled; a reservation still marked in flight belongs to a call whose after hook
++        // never ran (a defect, an interruption, or the not-available path in tool.ts) and
++        // is released rather than left to leak into the rest of the turn.
++        state.inFlight = 0
++        const turns = userTurns(event.messages)
++        if (turns !== state.userTurnsSeen) {
++          // A shrink means compaction or a revert rewrote history: adopt the new count so
++          // the next genuine user message registers as a new turn.
++          if (turns > state.userTurnsSeen) {
++            refill(state)
++            state.pendingBackground.clear()
++          }
++          state.userTurnsSeen = turns
++        }
++        // Settle background delegations whose completion synthetic has landed.
++        if (state.pendingBackground.size > 0) {
++          for (const message of event.messages) {
++            if (message.role !== "user") continue
++            const match = completionPattern.exec(textOf(message))
++            if (!match?.[1] || !state.pendingBackground.delete(match[1])) continue
++            if (match[2] === "completed") refill(state)
++          }
++        }
++        if (state.remindPending && !state.reminded) {
++          state.remindPending = false
++          state.reminded = true
++          const at = event.messages.at(-1)?.role === "user" ? event.messages.length - 1 : event.messages.length
++          event.messages.splice(at, 0, Message.user(reminder))
++        }
++        if (state.exploration < MAX_EXPLORATION_CALLS) return
++        // Delegation mode: the model keeps exactly the two tools that end the mode or
++        // escalate to the user. Everything else — including the Code Mode entry tool — is
++        // deleted from this request's map, so the calls are not merely blocked but absent.
++        for (const name of Object.keys(event.tools)) {
++          if (name !== "subagent" && name !== "question") delete event.tools[name]
++        }
++        const subagent = event.tools["subagent"]
++        if (subagent && !subagent.description.startsWith("REQUIRED NEXT ACTION"))
++          subagent.description = `${delegationModeDescription}\n\n${subagent.description}`
++      }).pipe(Effect.catchCause(() => Effect.void)),
++    )
++  }),
++})
+diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
+index d7ff117..2cfeeba 100644
+--- a/packages/core/test/agent.test.ts
++++ b/packages/core/test/agent.test.ts
+@@ -197,7 +197,7 @@ describe("Agent", () => {
+       expect(compaction?.system).toBeUndefined()
+       expect(compaction?.model).toBeUndefined()
+       expect(compaction?.request).toEqual(Agent.Info.default(Agent.ID.make("compaction")).request)
+-      expect(compaction?.permissions).toEqual(permissions.filter((rule) => rule.action !== "question"))
++      expect(compaction?.permissions).toEqual(Agent.Info.default(Agent.ID.make("compaction")).permissions)
+       expect(
+         Permission.evaluate("external_directory", path.join(global.data, "shell", "*", "*"), permissions).effect,
+       ).toBe("allow")
+diff --git a/packages/core/test/config/agent.test.ts b/packages/core/test/config/agent.test.ts
+index c324f0b..11d1381 100644
+--- a/packages/core/test/config/agent.test.ts
++++ b/packages/core/test/config/agent.test.ts
+@@ -236,6 +236,24 @@ permissions:
+       expect(build.permissions).toEqual([
+         ...defaultPermissions,
+         { action: "question", resource: "*", effect: "allow" },
++        { action: "shell", resource: "cat *", effect: "deny" },
++        { action: "shell", resource: "head *", effect: "deny" },
++        { action: "shell", resource: "tail *", effect: "deny" },
++        { action: "shell", resource: "less *", effect: "deny" },
++        { action: "shell", resource: "more *", effect: "deny" },
++        { action: "shell", resource: "ls *", effect: "deny" },
++        { action: "shell", resource: "find *", effect: "deny" },
++        { action: "shell", resource: "tree *", effect: "deny" },
++        { action: "shell", resource: "grep *", effect: "deny" },
++        { action: "shell", resource: "rg *", effect: "deny" },
++        { action: "shell", resource: "ag *", effect: "deny" },
++        { action: "shell", resource: "ack *", effect: "deny" },
++        { action: "shell", resource: "sed -i *", effect: "deny" },
++        { action: "shell", resource: "sed --in-place*", effect: "deny" },
++        { action: "shell", resource: "echo * > *", effect: "deny" },
++        { action: "shell", resource: "printf * > *", effect: "deny" },
++        { action: "glob", resource: "*", effect: "deny" },
++        { action: "grep", resource: "*", effect: "deny" },
+         { action: "shell", resource: "*", effect: "ask" },
+         { action: "edit", resource: "*", effect: "ask" },
+         { action: "webfetch", resource: "*", effect: "ask" },
+diff --git a/packages/core/test/plugin/tool-policy.test.ts b/packages/core/test/plugin/tool-policy.test.ts
+new file mode 100644
+index 0000000..da41ca7
+--- /dev/null
++++ b/packages/core/test/plugin/tool-policy.test.ts
+@@ -0,0 +1,830 @@
++import { describe, expect } from "bun:test"
++import { Message, ToolFailure } from "@opencode/ai/effect"
++import { Effect, Schema, Types } from "effect"
++import type { AgentEditor } from "@opencode/plugin/effect/agent"
++import type { SessionContext } from "@opencode/plugin/effect/session"
++import type { ToolHooks } from "@opencode/plugin/effect/tool"
++import { Agent } from "@opencode/core/agent"
++import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
++import { Environment } from "@opencode/core/environment/index"
++import { Location } from "@opencode/core/location"
++import { Model } from "@opencode/core/model"
++import { Permission } from "@opencode/core/permission"
++import { AgentPlugin } from "@opencode/core/plugin/agent"
++import { PlanPlugin } from "@opencode/core/plugin/plan"
++import {
++  MAX_EXPLORATION_CALLS,
++  REMIND_AT,
++  ToolPolicyPlugin,
++} from "@opencode/core/plugin/tool-policy"
++import { Provider } from "@opencode/core/provider"
++import { AbsolutePath } from "@opencode/core/schema"
++import { Session } from "@opencode/core/session"
++import { SessionMessage } from "@opencode/core/session/message"
++import { SubagentCompletion } from "@opencode/core/session/subagent-completion"
++import { ShellParse } from "@opencode/core/shell/parse"
++import { Tool } from "@opencode/core/tool"
++import { Global } from "@opencode/util/global"
++import { it } from "../lib/effect"
++import { host } from "./host"
++
++const build = Agent.ID.make("build")
++const plan = Agent.ID.make("plan")
++const general = Agent.ID.make("general")
++const explore = Agent.ID.make("explore")
++const home = "/home/tool-policy-test"
++
++/** Applies the built-in agent plugins to default agent infos, keyed by agent id. */
++const buildAgents = Effect.fnUntraced(function* () {
++  const agents = new Map<string, Types.DeepMutable<Agent.Info>>()
++  const editor: AgentEditor = {
++    list: () => Array.from(agents.values()),
++    get: (id) => agents.get(id),
++    default: () => {},
++    update: (id, update) => {
++      const defaults = Agent.Info.default(Agent.ID.make(id))
++      const current = agents.get(id) ?? { ...defaults, permissions: [...defaults.permissions] }
++      update(current)
++      agents.set(id, current)
++    },
++    remove: (id) => {
++      agents.delete(id)
++    },
++  }
++  const agent = {
++    get: () => Effect.die("unused agent.get"),
++    list: () => Effect.die("unused agent.list"),
++    reload: () => Effect.die("unused agent.reload"),
++    transform: (callback: (editor: AgentEditor) => void) => {
++      callback(editor)
++      return Effect.succeed({ dispose: Effect.void })
++    },
++  }
++  yield* AgentPlugin.Plugin.effect(host({ agent }))
++  const driver = Environment.makeMemoryDriver()
++  yield* PlanPlugin.Plugin.effect(
++    host({
++      agent,
++      tool: {
++        transform: () => Effect.die("unused tool.transform"),
++        reload: () => Effect.die("unused tool.reload"),
++        list: () => Effect.die("unused tool.list"),
++        hook: () => Effect.succeed({ dispose: Effect.void }),
++      },
++      session: { hook: () => Effect.succeed({ dispose: Effect.void }) },
++    }),
++  ).pipe(
++    Effect.provideService(Global.Service, Global.Service.of({ ...Global.make(), home })),
++    Effect.provideService(
++      Environment.Service,
++      Environment.Service.of({ files: Environment.makeFiles(driver), spawner: driver.spawner }),
++    ),
++  )
++  return agents
++})
++
++const rulesFor = (agents: Map<string, Types.DeepMutable<Agent.Info>>, id: Agent.ID) => {
++  const info = agents.get(id)
++  if (!info) throw new Error(`agent not built: ${id}`)
++  return info.permissions
++}
++
++/**
++ * The effect Permission.assert settles on for a shell command: the real parser's segments,
++ * each evaluated against the ruleset, aggregated the way Permission.assert aggregates them
++ * (any denied segment denies the call, otherwise any ask asks).
++ */
++const shellEffect = (rules: Permission.Ruleset, command: string) =>
++  ShellParse.scan(command, "bash", "/project").pipe(
++    Effect.map((parsed) => {
++      const effects = parsed.commands.map((segment) => Permission.evaluate("shell", segment.resource, rules).effect)
++      return effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow"
++    }),
++  )
++
++describe("agent permission rules", () => {
++  it.effect("denies shell segments whose work belongs to a dedicated tool, for build and general", () =>
++    Effect.gen(function* () {
++      const agents = yield* buildAgents()
++      for (const id of [build, general]) {
++        const rules = rulesFor(agents, id)
++        for (const command of [
++          "cat file.txt",
++          "head -5 file.txt",
++          "tail -5 file.txt",
++          "ls -la",
++          "find . -name '*.ts'",
++          "grep -r foo src",
++          "rg foo",
++          "sed -i 's/a/b/' file.txt",
++          "sed --in-place 's/a/b/' file.txt",
++          "echo hello > out.txt",
++          "printf 'x' > out.txt",
++          // A denied segment denies the whole compound command.
++          "cd sub && cat y",
++          "bun test | grep FAIL",
++        ]) {
++          expect(yield* shellEffect(rules, command)).toBe("deny")
++        }
++        for (const command of ["git log --oneline", "git status", "bun test", "bun run build", "echo hello"]) {
++          expect(yield* shellEffect(rules, command)).toBe("allow")
++        }
++      }
++    }),
++  )
++
++  it.effect("removes glob and grep from build and plan only", () =>
++    Effect.gen(function* () {
++      const agents = yield* buildAgents()
++      for (const id of [build, plan]) {
++        const rules = rulesFor(agents, id)
++        expect(Permission.evaluate("glob", "src/**/*.ts", rules).effect).toBe("deny")
++        expect(Permission.evaluate("grep", "foo", rules).effect).toBe("deny")
++        expect(Permission.evaluate("read", "src/index.ts", rules).effect).toBe("allow")
++      }
++      for (const id of [general, explore]) {
++        const rules = rulesFor(agents, id)
++        expect(Permission.evaluate("glob", "src/**/*.ts", rules).effect).toBe("allow")
++        expect(Permission.evaluate("grep", "foo", rules).effect).toBe("allow")
++      }
++    }),
++  )
++})
++
++const toolNode = AppNodeBuilder.build(Tool.node, [
++  Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
++])
++
++describe("tool catalog", () => {
++  it.effect("snapshots for build and plan exclude glob and grep; explore and general keep them", () =>
++    Effect.gen(function* () {
++      const agents = yield* buildAgents()
++      const tools = yield* Tool.Service
++      yield* tools.transform((editor) => {
++        for (const name of ["glob", "grep", "read"]) {
++          editor.add({
++            name,
++            description: name,
++            input: Schema.Struct({}),
++            options: { codemode: false },
++            execute: () => Effect.succeed({ content: "ok" }),
++          })
++        }
++      })
++      const visible = (snapshot: Tool.Snapshot) =>
++        new Set([
++          ...snapshot.definitions.map((definition) => definition.name),
++          ...(snapshot.codeModeCatalog?.tools ?? []).flatMap((entry) => (entry.type === "tool" ? [entry.name] : [])),
++        ])
++      for (const id of [build, plan]) {
++        const names = visible(yield* tools.snapshot(rulesFor(agents, id)))
++        expect(names.has("read")).toBe(true)
++        expect(names.has("glob")).toBe(false)
++        expect(names.has("grep")).toBe(false)
++      }
++      for (const id of [general, explore]) {
++        const names = visible(yield* tools.snapshot(rulesFor(agents, id)))
++        expect(names.has("read")).toBe(true)
++        expect(names.has("glob")).toBe(true)
++        expect(names.has("grep")).toBe(true)
++      }
++    }).pipe(Effect.scoped, Effect.provide(toolNode)),
++  )
++})
++
++/** Runs the tool policy plugin against stubbed domains, capturing its three hooks. */
++const runPolicy = Effect.fnUntraced(function* () {
++  let beforeHook: ((input: ToolHooks["execute.before"]) => Effect.Effect<void, Tool.Error>) | undefined
++  let afterHook: ((input: ToolHooks["execute.after"]) => Effect.Effect<void>) | undefined
++  let contextHook: ((input: SessionContext) => Effect.Effect<void>) | undefined
++  yield* ToolPolicyPlugin.Plugin.effect(
++    host({
++      tool: {
++        transform: () => Effect.die("unused tool.transform"),
++        reload: () => Effect.die("unused tool.reload"),
++        list: () => Effect.die("unused tool.list"),
++        hook: (name, callback) => {
++          // Hook names and callbacks are correlated, but TypeScript does not narrow this generic registration API.
++          // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
++          if (name === "execute.before") beforeHook = callback as unknown as typeof beforeHook
++          // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
++          if (name === "execute.after") afterHook = callback as unknown as typeof afterHook
++          return Effect.succeed({ dispose: Effect.void })
++        },
++      },
++      session: {
++        hook: (name, callback) => {
++          if (name === "context") contextHook = callback as typeof contextHook
++          return Effect.succeed({ dispose: Effect.void })
++        },
++      },
++    }),
++  )
++  if (!beforeHook) return yield* Effect.die("tool policy plugin did not register execute.before")
++  if (!afterHook) return yield* Effect.die("tool policy plugin did not register execute.after")
++  if (!contextHook) return yield* Effect.die("tool policy plugin did not register a context hook")
++  return { beforeHook, afterHook, contextHook }
++})
++
++const before = (
++  sessionID: Session.ID,
++  agent: Agent.ID,
++  tool: string,
++): ToolHooks["execute.before"] => ({
++  tool,
++  sessionID,
++  agent,
++  messageID: SessionMessage.ID.make("msg_tool_policy"),
++  id: Tool.CallID.make("call_tool_policy"),
++  input: {},
++})
++
++type ToolErrorEvent = Extract<ToolHooks["execute.after"], { readonly status: "error" }>
++
++const toolError = (
++  sessionID: Session.ID,
++  agent: Agent.ID,
++  tool: string,
++  error: Tool.Error,
++  input: unknown = {},
++): ToolErrorEvent => ({
++  tool,
++  input,
++  sessionID,
++  agent,
++  messageID: SessionMessage.ID.make("msg_tool_policy"),
++  id: Tool.CallID.make("call_tool_policy"),
++  status: "error",
++  error,
++})
++
++type ToolCompletedEvent = Extract<ToolHooks["execute.after"], { readonly status: "completed" }>
++
++const toolCompleted = (
++  sessionID: Session.ID,
++  agent: Agent.ID,
++  tool: string,
++  input: unknown = {},
++  result: { output?: unknown; content?: string; metadata?: Record<string, unknown> } = { content: "ok" },
++): ToolCompletedEvent => ({
++  tool,
++  input,
++  sessionID,
++  agent,
++  messageID: SessionMessage.ID.make("msg_tool_policy"),
++  id: Tool.CallID.make("call_tool_policy"),
++  status: "completed",
++  result,
++})
++
++const request = (
++  sessionID: Session.ID,
++  agent: Agent.ID,
++  messages: Array<Message>,
++  tools: SessionContext["tools"] = {},
++): SessionContext => ({
++  sessionID,
++  agent,
++  model: { id: Model.ID.make("test-model"), providerID: Provider.ID.make("test") },
++  system: [],
++  messages,
++  tools,
++  options: {},
++})
++
++/** A tools map as prepare() hands it to the context hook: one entry per advertised tool. */
++const toolsMap = (names: ReadonlyArray<string>): SessionContext["tools"] =>
++  Object.fromEntries(names.map((name) => [name, { description: `${name} tool`, input: { type: "object" } }]))
++
++const fullToolset = [
++  "read",
++  "glob",
++  "grep",
++  "shell",
++  "edit",
++  "write",
++  "patch",
++  "todowrite",
++  "execute",
++  "webfetch",
++  "subagent",
++  "question",
++]
++
++type Hooks = {
++  readonly beforeHook: (input: ToolHooks["execute.before"]) => Effect.Effect<void, Tool.Error>
++  readonly afterHook: (input: ToolHooks["execute.after"]) => Effect.Effect<void>
++  readonly contextHook: (input: SessionContext) => Effect.Effect<void>
++}
++
++/** Drives one exploration call through the before hook and a settling after hook. */
++const driveCall = Effect.fnUntraced(function* (
++  hooks: Hooks,
++  sessionID: Session.ID,
++  agent: Agent.ID,
++  tool: string,
++  settle: "completed" | "error",
++) {
++  yield* hooks.beforeHook(before(sessionID, agent, tool))
++  yield* settle === "completed"
++    ? hooks.afterHook(toolCompleted(sessionID, agent, tool))
++    : hooks.afterHook(toolError(sessionID, agent, tool, new ToolFailure({ message: "boom" })))
++})
++
++const completeCall = (hooks: Hooks, sessionID: Session.ID, agent: Agent.ID, tool: string) =>
++  driveCall(hooks, sessionID, agent, tool, "completed")
++
++const failCall = (hooks: Hooks, sessionID: Session.ID, agent: Agent.ID, tool: string) =>
++  driveCall(hooks, sessionID, agent, tool, "error")
++
++/** A substantive delegation briefing: comfortably over the substance floor. */
++const briefing = "Map the pricing module end to end: every file, its exports, and who calls them."
++
++/** Settles a subagent call in the after hook with the given input and settled output. */
++const settleSubagent = Effect.fnUntraced(function* (
++  hooks: Hooks,
++  sessionID: Session.ID,
++  agent: Agent.ID,
++  input: { agent: string; prompt: string; background?: boolean; sessionID?: string },
++  output: { sessionID: string; status: string; output: string },
++) {
++  yield* hooks.afterHook(
++    toolCompleted(sessionID, agent, "subagent", input, {
++      output,
++      metadata: { sessionID: output.sessionID, status: output.status },
++    }),
++  )
++})
++
++const blockedShell = (resources: ReadonlyArray<string>) =>
++  new ToolFailure({
++    message: "Permission denied: shell",
++    error: new Permission.BlockedError({ rules: [], permission: "shell", resources: [...resources] }),
++  })
++
++describe("tool policy exploration budget", () => {
++  it.effect("lets the budgeted exploration calls through and rejects the next one", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_budget")
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")]))
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, sessionID, build, "read")
++      const error = yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)
++      expect(error).toBeInstanceOf(ToolFailure)
++      expect(error.message).toBe(
++        `Exploration budget for this turn is exhausted (${MAX_EXPLORATION_CALLS} direct calls). Use the \`subagent\` tool (agent: \`explore\`) for further exploration; the budget refills after a delegation.`,
++      )
++    }),
++  )
++
++  it.effect("reserves slots for in-flight calls and returns them when a call errors", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_inflight")
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")]))
++      // One parallel block: eight attempts reserve the whole allowance before any settles.
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* hooks.beforeHook(before(sessionID, build, "read"))
++      expect(yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++      // An errored attempt gives its slot back instead of consuming budget: a retry takes
++      // the freed slot and completes, advancing the ladder by exactly one.
++      yield* hooks.afterHook(toolError(sessionID, build, "read", new ToolFailure({ message: "boom" })))
++      yield* hooks.beforeHook(before(sessionID, build, "read"))
++      yield* hooks.afterHook(toolCompleted(sessionID, build, "read"))
++      // The rest of the block settles as errors too, returning their slots.
++      for (let i = 0; i < MAX_EXPLORATION_CALLS - 1; i++)
++        yield* hooks.afterHook(toolError(sessionID, build, "read", new ToolFailure({ message: "boom" })))
++      // Seven more completions fit; the ninth completed call of the turn is refused.
++      for (let i = 0; i < MAX_EXPLORATION_CALLS - 1; i++) yield* completeCall(hooks, sessionID, build, "read")
++      expect(yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++    }),
++  )
++
++  it.effect("does not count exploration calls that error", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_failed_reads")
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")]))
++      for (let i = 0; i < MAX_EXPLORATION_CALLS + 4; i++) yield* failCall(hooks, sessionID, build, "read")
++      // Nothing was consumed: the full toolset is still offered and reads still pass.
++      const tools = toolsMap(fullToolset)
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")], tools))
++      expect(Object.keys(tools).sort()).toEqual([...fullToolset].sort())
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, sessionID, build, "read")
++      expect(yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++    }),
++  )
++
++  it.effect("injects the delegation reminder once, after the fifth completed exploration call", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_reminder")
++      const messages = [Message.user("start")]
++      yield* hooks.contextHook(request(sessionID, build, messages))
++      for (let i = 0; i < REMIND_AT - 1; i++) yield* completeCall(hooks, sessionID, build, "read")
++      yield* hooks.contextHook(request(sessionID, build, messages))
++      expect(messages).toHaveLength(1)
++      yield* completeCall(hooks, sessionID, build, "read")
++      yield* hooks.contextHook(request(sessionID, build, messages))
++      expect(messages).toHaveLength(2)
++      const reminder = messages[0]?.content[0]
++      expect(reminder?.type === "text" && reminder.text).toContain("[system-reminder]")
++      expect(reminder?.type === "text" && reminder.text).toContain(`${REMIND_AT} direct exploration calls`)
++      expect(reminder?.type === "text" && reminder.text).toContain("Delegate remaining exploration")
++      // The reminder fires once per turn, even though it stays visible in this transcript.
++      yield* hooks.contextHook(request(sessionID, build, messages))
++      expect(messages).toHaveLength(2)
++    }),
++  )
++
++  it.effect("resets the budget when a new user turn begins", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_turns")
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("one")]))
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, sessionID, build, "read")
++      expect(yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("one"), Message.user("two")]))
++      yield* hooks.beforeHook(before(sessionID, build, "read"))
++    }),
++  )
++
++  it.effect("does not count harness synthetics or compaction checkpoints as user turns", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_synthetics")
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("one")]))
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, sessionID, build, "read")
++      yield* hooks.contextHook(
++        request(sessionID, build, [
++          Message.user("one"),
++          Message.user("[system-reminder> You are in Plan mode."),
++          Message.user("<conversation-checkpoint>\n<summary>earlier work</summary>\n</conversation-checkpoint>"),
++          Message.user('<subagent sessionID="ses_child" state="completed" description="explore">done</subagent>'),
++        ]),
++      )
++      // Still the same turn: the budget stays exhausted.
++      expect(yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++    }),
++  )
++
++  it.effect("governs plan like build, counts glob and grep, and leaves other agents alone", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const planSession = Session.ID.make("ses_policy_plan")
++      yield* hooks.contextHook(request(planSession, plan, [Message.user("start")]))
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, planSession, plan, "glob")
++      expect(yield* hooks.beforeHook(before(planSession, plan, "grep")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++
++      for (const [agent, sessionID] of [
++        [explore, Session.ID.make("ses_policy_explore")],
++        [general, Session.ID.make("ses_policy_general")],
++      ] as const) {
++        yield* hooks.contextHook(request(sessionID, agent, [Message.user("start")]))
++        for (let i = 0; i < MAX_EXPLORATION_CALLS + 4; i++) yield* completeCall(hooks, sessionID, agent, "read")
++      }
++    }),
++  )
++})
++
++describe("tool policy delegation mode", () => {
++  it.effect("removes every tool but subagent and question once the budget is spent, and restores them after a refill", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_mode")
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")]))
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, sessionID, build, "read")
++      const pruned = toolsMap(fullToolset)
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")], pruned))
++      expect(Object.keys(pruned).sort()).toEqual(["question", "subagent"])
++      expect(pruned["subagent"]?.description).toContain("REQUIRED NEXT ACTION")
++      expect(pruned["subagent"]?.description).toContain("your direct tool budget for this turn is exhausted")
++      // A completed, substantive delegation ends the mode: the next request offers everything.
++      yield* settleSubagent(hooks, sessionID, build, { agent: "explore", prompt: briefing }, {
++        sessionID: "ses_child_mode",
++        status: "completed",
++        output: "The pricing module consists of four files.",
++      })
++      const restored = toolsMap(fullToolset)
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")], restored))
++      expect(Object.keys(restored).sort()).toEqual([...fullToolset].sort())
++      expect(restored["subagent"]?.description).toBe("subagent tool")
++    }),
++  )
++
++  it.effect("keeps the full toolset while any budget remains", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_mode_open")
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")]))
++      for (let i = 0; i < MAX_EXPLORATION_CALLS - 1; i++) yield* completeCall(hooks, sessionID, build, "read")
++      const tools = toolsMap(fullToolset)
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")], tools))
++      expect(Object.keys(tools).sort()).toEqual([...fullToolset].sort())
++      expect(tools["subagent"]?.description).toBe("subagent tool")
++    }),
++  )
++})
++
++describe("tool policy delegation refill", () => {
++  const exhaust = Effect.fnUntraced(function* (hooks: Hooks, sessionID: Session.ID, agent: Agent.ID) {
++    yield* hooks.contextHook(request(sessionID, agent, [Message.user("start")]))
++    for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, sessionID, agent, "read")
++  })
++
++  it.effect("refills after a completed substantive foreground delegation, including follow-ups", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_refill_fg")
++      yield* exhaust(hooks, sessionID, build)
++      expect(yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++      yield* settleSubagent(hooks, sessionID, build, { agent: "explore", prompt: briefing }, {
++        sessionID: "ses_child_fg",
++        status: "completed",
++        output: "Findings.",
++      })
++      // The full budget is available again.
++      for (let i = 0; i < MAX_EXPLORATION_CALLS; i++) yield* completeCall(hooks, sessionID, build, "read")
++      expect(yield* hooks.beforeHook(before(sessionID, build, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++      // A follow-up to an existing child counts the same way.
++      yield* settleSubagent(
++        hooks,
++        sessionID,
++        build,
++        { agent: "explore", prompt: briefing, sessionID: "ses_child_fg" },
++        { sessionID: "ses_child_fg", status: "completed", output: "More findings." },
++      )
++      yield* hooks.beforeHook(before(sessionID, build, "read"))
++    }),
++  )
++
++  it.effect("does not refill for delegations that are trivial, empty, or failed", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const stillExhausted = (sessionID: Session.ID, agent: Agent.ID) =>
++        hooks.beforeHook(before(sessionID, agent, "read")).pipe(Effect.flip)
++
++      // A ten-character prompt is not a briefing, however well the child does.
++      const short = Session.ID.make("ses_policy_short_prompt")
++      yield* exhaust(hooks, short, build)
++      yield* settleSubagent(hooks, short, build, { agent: "explore", prompt: "1234567890" }, {
++        sessionID: "ses_child_short",
++        status: "completed",
++        output: "Findings.",
++      })
++      expect(yield* stillExhausted(short, build)).toBeInstanceOf(ToolFailure)
++
++      // A child that completed without a text response did no delegable work.
++      const silent = Session.ID.make("ses_policy_no_text")
++      yield* exhaust(hooks, silent, build)
++      yield* settleSubagent(hooks, silent, build, { agent: "explore", prompt: briefing }, {
++        sessionID: "ses_child_silent",
++        status: "completed",
++        output: SubagentCompletion.NO_TEXT,
++      })
++      expect(yield* stillExhausted(silent, build)).toBeInstanceOf(ToolFailure)
++
++      // Neither did one whose output is empty.
++      const empty = Session.ID.make("ses_policy_empty_output")
++      yield* exhaust(hooks, empty, build)
++      yield* settleSubagent(hooks, empty, build, { agent: "explore", prompt: briefing }, {
++        sessionID: "ses_child_empty",
++        status: "completed",
++        output: "  ",
++      })
++      expect(yield* stillExhausted(empty, build)).toBeInstanceOf(ToolFailure)
++
++      // A delegation that errors never refills.
++      const failed = Session.ID.make("ses_policy_failed_delegation")
++      yield* exhaust(hooks, failed, build)
++      yield* hooks.afterHook(
++        toolError(failed, build, "subagent", new ToolFailure({ message: "Subagent failed" }), {
++          agent: "explore",
++          prompt: briefing,
++        }),
++      )
++      expect(yield* stillExhausted(failed, build)).toBeInstanceOf(ToolFailure)
++    }),
++  )
++
++  it.effect("lets build refill through general, but plan only through explore", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const viaGeneral = Session.ID.make("ses_policy_via_general")
++      yield* exhaust(hooks, viaGeneral, build)
++      yield* settleSubagent(hooks, viaGeneral, build, { agent: "general", prompt: briefing }, {
++        sessionID: "ses_child_general",
++        status: "completed",
++        output: "Done.",
++      })
++      yield* hooks.beforeHook(before(viaGeneral, build, "read"))
++
++      const planSession = Session.ID.make("ses_policy_plan_targets")
++      yield* exhaust(hooks, planSession, plan)
++      yield* settleSubagent(hooks, planSession, plan, { agent: "general", prompt: briefing }, {
++        sessionID: "ses_child_plan_general",
++        status: "completed",
++        output: "Done.",
++      })
++      expect(yield* hooks.beforeHook(before(planSession, plan, "read")).pipe(Effect.flip)).toBeInstanceOf(ToolFailure)
++      yield* settleSubagent(hooks, planSession, plan, { agent: "explore", prompt: briefing }, {
++        sessionID: "ses_child_plan_explore",
++        status: "completed",
++        output: "Done.",
++      })
++      yield* hooks.beforeHook(before(planSession, plan, "read"))
++    }),
++  )
++
++  it.effect("settles a background delegation only when its completion synthetic lands", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_background")
++      yield* exhaust(hooks, sessionID, build)
++      // The launch alone settles nothing: the tools stay pruned.
++      yield* settleSubagent(
++        hooks,
++        sessionID,
++        build,
++        { agent: "explore", prompt: briefing, background: true },
++        { sessionID: "ses_child_bg", status: "running", output: "The subagent is working in the background." },
++      )
++      const pruned = toolsMap(fullToolset)
++      yield* hooks.contextHook(request(sessionID, build, [Message.user("start")], pruned))
++      expect(Object.keys(pruned).sort()).toEqual(["question", "subagent"])
++      // The completion synthetic claims the credit and refills.
++      const restored = toolsMap(fullToolset)
++      yield* hooks.contextHook(
++        request(
++          sessionID,
++          build,
++          [
++            Message.user("start"),
++            Message.user(
++              '<subagent sessionID="ses_child_bg" state="completed" description="Map pricing">Findings.</subagent>',
++            ),
++          ],
++          restored,
++        ),
++      )
++      expect(Object.keys(restored).sort()).toEqual([...fullToolset].sort())
++      yield* hooks.beforeHook(before(sessionID, build, "read"))
++    }),
++  )
++
++  it.effect("drops a background credit whose child fails or whose launch was trivial", () =>
++    Effect.gen(function* () {
++      const hooks = yield* runPolicy()
++      const failedSession = Session.ID.make("ses_policy_background_failed")
++      yield* exhaust(hooks, failedSession, build)
++      yield* settleSubagent(
++        hooks,
++        failedSession,
++        build,
++        { agent: "explore", prompt: briefing, background: true },
++        { sessionID: "ses_child_bg_failed", status: "running", output: "The subagent is working in the background." },
++      )
++      yield* hooks.contextHook(
++        request(failedSession, build, [
++          Message.user("start"),
++          Message.user(
++            '<subagent sessionID="ses_child_bg_failed" state="error" description="Map pricing">Subagent failed</subagent>',
++          ),
++        ]),
++      )
++      expect(yield* hooks.beforeHook(before(failedSession, build, "read")).pipe(Effect.flip)).toBeInstanceOf(
++        ToolFailure,
++      )
++
++      // A launch whose prompt never qualified records no credit for its completion to claim.
++      const trivialSession = Session.ID.make("ses_policy_background_trivial")
++      yield* exhaust(hooks, trivialSession, build)
++      yield* settleSubagent(
++        hooks,
++        trivialSession,
++        build,
++        { agent: "explore", prompt: "1234567890", background: true },
++        { sessionID: "ses_child_bg_trivial", status: "running", output: "The subagent is working in the background." },
++      )
++      yield* hooks.contextHook(
++        request(trivialSession, build, [
++          Message.user("start"),
++          Message.user(
++            '<subagent sessionID="ses_child_bg_trivial" state="completed" description="Quick look">Findings.</subagent>',
++          ),
++        ]),
++      )
++      expect(yield* hooks.beforeHook(before(trivialSession, build, "read")).pipe(Effect.flip)).toBeInstanceOf(
++        ToolFailure,
++      )
++    }),
++  )
++})
++
++describe("agent steps backstop", () => {
++  it.effect("sets a steps ceiling on build and plan only", () =>
++    Effect.gen(function* () {
++      const agents = yield* buildAgents()
++      expect(agents.get(build)?.steps).toBe(100)
++      expect(agents.get(plan)?.steps).toBe(100)
++      expect(agents.get(general)?.steps).toBeUndefined()
++      expect(agents.get(explore)?.steps).toBeUndefined()
++    }),
++  )
++})
++
++describe("tool policy shell guidance", () => {
++  it.effect("rewrites hygiene denials into pointers to the designated tool", () =>
++    Effect.gen(function* () {
++      const { afterHook } = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_guidance")
++      const cases: ReadonlyArray<{ agent: Agent.ID; resources: ReadonlyArray<string>; expected: string }> = [
++        {
++          agent: build,
++          resources: ["cat file.txt"],
++          expected:
++            "Shell command `cat` is blocked for this agent. Use the `read` tool instead: it is the designated tool for reading file contents and returns numbered lines.",
++        },
++        {
++          // Build has no glob tool: its pointer names read-on-directory and delegation instead.
++          agent: build,
++          resources: ["ls -la"],
++          expected:
++            "Shell command `ls` is blocked for this agent. Use the `read` tool on a directory to list it. Finding files by pattern across the project is delegated work: use the `subagent` tool (agent: `explore`) — this agent has no `glob` tool.",
++        },
++        {
++          agent: general,
++          resources: ["ls -la"],
++          expected:
++            "Shell command `ls` is blocked for this agent. Use the `glob` tool to find files by pattern, or the `read` tool on a directory to list it.",
++        },
++        {
++          // Build has no grep tool either: content search is delegated to Explore.
++          agent: build,
++          resources: ["grep -r foo ."],
++          expected:
++            "Shell command `grep` is blocked for this agent. Searching file contents is delegated work: use the `subagent` tool (agent: `explore`) — this agent has no `grep` tool. Use the `read` tool for files whose path you already know.",
++        },
++        {
++          agent: general,
++          resources: ["grep -r foo ."],
++          expected:
++            "Shell command `grep` is blocked for this agent. Use the `grep` tool instead: it is the designated tool for searching file contents.",
++        },
++        {
++          agent: build,
++          resources: ["sed -i 's/a/b/' file.txt"],
++          expected:
++            "Shell command `sed` is blocked for this agent. Use the `edit` tool (or `write`/`patch`) instead: shell in-place editing is blocked.",
++        },
++        {
++          agent: build,
++          resources: ["echo hello > out.txt"],
++          expected:
++            "Shell command `echo` is blocked for this agent. Use the `write` tool instead: shell redirection is blocked for writing files.",
++        },
++        {
++          // The hygiene segment is found among the resources of a compound command.
++          agent: build,
++          resources: ["cd /project", "cat y"],
++          expected:
++            "Shell command `cat` is blocked for this agent. Use the `read` tool instead: it is the designated tool for reading file contents and returns numbered lines.",
++        },
++      ]
++      for (const item of cases) {
++        const event = toolError(sessionID, item.agent, "shell", blockedShell(item.resources))
++        yield* afterHook(event)
++        expect(event.error.message).toBe(item.expected)
++      }
++    }),
++  )
++
++  it.effect("leaves denials the hygiene rules did not cause untouched", () =>
++    Effect.gen(function* () {
++      const { afterHook } = yield* runPolicy()
++      const sessionID = Session.ID.make("ses_policy_untouched")
++      // A shell denial for another reason (here: a configured rm deny).
++      const rm = toolError(sessionID, build, "shell", blockedShell(["rm -rf build"]))
++      const rmError = rm.error
++      yield* afterHook(rm)
++      expect(rm.error).toBe(rmError)
++      // Plan's shell is denied outright by its own rules; the plan plugin owns that message.
++      const planEvent = toolError(sessionID, plan, "shell", blockedShell(["cat file.txt"]))
++      const planError = planEvent.error
++      yield* afterHook(planEvent)
++      expect(planEvent.error).toBe(planError)
++      // Non-shell errors are never rewritten.
++      const read = toolError(
++        sessionID,
++        build,
++        "read",
++        new ToolFailure({
++          message: "Permission denied: read",
++          error: new Permission.BlockedError({ rules: [], permission: "read", resources: ["secret.txt"] }),
++        }),
++      )
++      const readError = read.error
++      yield* afterHook(read)
++      expect(read.error).toBe(readError)
++    }),
++  )
++})
