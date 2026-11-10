@@ -1,0 +1,3668 @@
+From 284c63139046f31b57f640ecdfac87fdace59c54 Mon Sep 17 00:00:00 2001
+From: azrialwork <azrial.work@gmail.com>
+Date: Tue, 10 Nov 2026 23:26:37 +0700
+Subject: [PATCH] feat(cli): remove the self-update feature entirely
+
+Delete the upgrade command (and its update alias), the Updater service with its background checks against the update API, the update preflight handoff screen, the TUI update dialog/notification/banner and /update command, the installation.update-available/updated server events, and the update/autoupdate config settings (existing configs now omit them as unsupported legacy settings). Install-method detection and package removal move to a small InstallMethod service so uninstall keeps working unchanged.
+---
+ packages/cli/src/commands/commands.ts         |  16 -
+ packages/cli/src/commands/handlers/default.ts |  56 +-
+ .../cli/src/commands/handlers/uninstall.ts    |   8 +-
+ packages/cli/src/commands/handlers/upgrade.ts |  81 ---
+ packages/cli/src/framework/runtime.ts         |   8 +-
+ packages/cli/src/index.ts                     |   5 +-
+ packages/cli/src/services/install-method.ts   | 190 ++++++
+ packages/cli/src/services/retained-image.ts   |   4 +-
+ .../cli/src/services/update-preflight.tsx     | 473 -------------
+ packages/cli/src/services/updater-action.ts   |  48 --
+ packages/cli/src/services/updater.test.ts     |  87 ---
+ packages/cli/src/services/updater.ts          | 629 ------------------
+ packages/cli/test/fixture/upgrade.ts          |  39 --
+ packages/cli/test/retained-image.test.ts      |  10 +-
+ packages/cli/test/updater-install.test.ts     | 606 -----------------
+ packages/cli/test/upgrade.test.ts             | 121 ----
+ packages/client/src/effect/api/api.ts         |   2 -
+ .../client/src/promise/generated/types.ts     |  23 -
+ packages/core/src/config/normalize.ts         |  19 +-
+ packages/core/test/config/config.test.ts      |  20 +-
+ packages/schema/src/config.ts                 |   3 -
+ packages/schema/src/event-manifest.ts         |   3 -
+ packages/schema/src/installation-event.ts     |  20 -
+ packages/server/src/process.ts                |   6 -
+ packages/server/test/process.test.ts          |   4 -
+ packages/tui/src/app.tsx                      |  27 +-
+ packages/tui/src/component/dialog-update.tsx  | 171 -----
+ packages/tui/src/context/epilogue.tsx         |   2 -
+ .../tui/src/context/update-notification.tsx   | 158 -----
+ packages/tui/src/routes/home.tsx              |  66 +-
+ packages/tui/src/util/presentation.ts         |   7 +-
+ packages/tui/test/cli/tui/use-event.test.tsx  |  14 +-
+ .../tui/test/component/dialog-update.test.tsx |  62 --
+ packages/tui/test/util/presentation.test.ts   |  12 +-
+ 34 files changed, 231 insertions(+), 2769 deletions(-)
+ delete mode 100644 packages/cli/src/commands/handlers/upgrade.ts
+ create mode 100644 packages/cli/src/services/install-method.ts
+ delete mode 100644 packages/cli/src/services/update-preflight.tsx
+ delete mode 100644 packages/cli/src/services/updater-action.ts
+ delete mode 100644 packages/cli/src/services/updater.test.ts
+ delete mode 100644 packages/cli/src/services/updater.ts
+ delete mode 100644 packages/cli/test/fixture/upgrade.ts
+ delete mode 100644 packages/cli/test/updater-install.test.ts
+ delete mode 100644 packages/cli/test/upgrade.test.ts
+ delete mode 100644 packages/schema/src/installation-event.ts
+ delete mode 100644 packages/tui/src/component/dialog-update.tsx
+ delete mode 100644 packages/tui/src/context/update-notification.tsx
+ delete mode 100644 packages/tui/test/component/dialog-update.test.tsx
+
+diff --git a/packages/cli/src/commands/commands.ts b/packages/cli/src/commands/commands.ts
+index f9e3fe2..61a2046 100644
+--- a/packages/cli/src/commands/commands.ts
++++ b/packages/cli/src/commands/commands.ts
+@@ -2,7 +2,6 @@ import { Argument, Flag, GlobalFlag } from "effect/cli"
+ import { Schema } from "effect"
+ import { CliFlag } from "../framework/flag"
+ import { Spec } from "../framework/spec"
+-import { Updater } from "../services/updater"
+ 
+ export const PrintLogs = GlobalFlag.Setting("print-logs")({
+   flag: Flag.Boolean("print-logs").pipe(
+@@ -68,21 +67,6 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
+     prompt: Flag.String("prompt").pipe(Flag.withDescription("Prompt to use"), Flag.optional),
+   },
+   commands: [
+-    Spec.make("upgrade", {
+-      description: "Upgrade OpenCode to the latest or a specific version",
+-      aliases: ["update"],
+-      params: {
+-        target: Argument.String("target").pipe(
+-          Argument.withDescription("Version to upgrade to (with or without a leading v)"),
+-          Argument.optional,
+-        ),
+-        method: Flag.Literals("method", Updater.methods).pipe(
+-          Flag.withAlias("m"),
+-          Flag.withDescription("Installation method to use"),
+-          Flag.optional,
+-        ),
+-      },
+-    }),
+     Spec.make("uninstall", {
+       description: "Uninstall OpenCode, keeping session data, configuration, and state",
+       params: {
+diff --git a/packages/cli/src/commands/handlers/default.ts b/packages/cli/src/commands/handlers/default.ts
+index c23e2be..ebae792 100644
+--- a/packages/cli/src/commands/handlers/default.ts
++++ b/packages/cli/src/commands/handlers/default.ts
+@@ -4,10 +4,8 @@ import { run } from "@opencode/tui"
+ import { Commands } from "../commands"
+ import { Runtime } from "../../framework/runtime"
+ import { Config } from "../../config"
+-import { Context, Effect, FileSystem, Option, Queue, Schedule, Semaphore } from "effect"
++import { Context, Effect, FileSystem, Option, Queue } from "effect"
+ import { ServerConnection } from "../../services/server-connection"
+-import { Updater } from "../../services/updater"
+-import { UpdatePreflight } from "../../services/update-preflight"
+ import { Npm } from "@opencode/util/npm"
+ import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_HIGHLIGHTS, OPENCODE_VERSION } from "../../version"
+ import { Env } from "../../env"
+@@ -21,8 +19,6 @@ export default Runtime.handler(Commands, (input) =>
+     const requestedDirectory = Option.getOrUndefined(input.directory)
+     const requestedServer = Option.getOrUndefined(input.server)
+     if (requestedDirectory !== undefined) process.chdir(requestedDirectory)
+-    const preflight = UpdatePreflight.make()
+-    yield* Effect.addFinalizer(() => Effect.promise(() => preflight.close()))
+     const serviceStarts = yield* Queue.unbounded<{
+       readonly reason: "missing" | "version-mismatch"
+       readonly previousVersion?: string
+@@ -38,18 +34,13 @@ export default Runtime.handler(Commands, (input) =>
+       mismatch: "replace",
+       onStart: (reason, previousVersion) => {
+         Queue.offerUnsafe(serviceStarts, { reason, previousVersion })
+-        if (reason === "version-mismatch" && preflight.begin(previousVersion)) return
+         process.stderr.write(
+           reason === "version-mismatch"
+             ? "Restarting background server (version mismatch)...\n"
+             : "Starting background server...\n",
+         )
+       },
+-    }).pipe(
+-      Effect.tapError(() =>
+-        Effect.promise(() => preflight.fail("OpenCode update could not start the new background service")),
+-      ),
+-    )
++    })
+     const session = Option.getOrUndefined(input.session)
+     // A missing --session ID becomes the ID of the session the first prompt creates.
+     const sessionExists =
+@@ -59,32 +50,6 @@ export default Runtime.handler(Commands, (input) =>
+           findSession(OpenCode.make({ baseUrl: server.endpoint.url, headers: Service.headers(server.endpoint) }), session),
+         catch: (cause) => new Error(errorMessage(cause)),
+       })) !== undefined
+-    const updater = yield* Updater.Service
+-    let installing: string | undefined
+-    let latest: Updater.RunResult | undefined
+-    const installListeners = new Set<(version: string) => void>()
+-    const resultListeners = new Set<(result: Updater.RunResult) => void>()
+-    // Background checks, `/update` lookups, and manual installs take turns so two installs never overlap.
+-    const checking = yield* Semaphore.make(1)
+-    yield* updater
+-      .run((version) => {
+-        installing = version
+-        installListeners.forEach((notify) => notify(version))
+-      })
+-      .pipe(
+-        Effect.ensuring(Effect.sync(() => (installing = undefined))),
+-        Effect.tap((result) =>
+-          Effect.sync(() => {
+-            if (!result || (result.type === latest?.type && result.version === latest.version)) return
+-            latest = result
+-            resultListeners.forEach((notify) => notify(result))
+-          }),
+-        ),
+-        checking.withPermits(1),
+-        Effect.repeat(Schedule.spaced("10 minutes")),
+-        Effect.forkScoped({ startImmediately: true }),
+-      )
+-    preflight.loading()
+     const config = yield* Config.Service
+     const npm = yield* Npm.Service
+     const fileSystem = yield* FileSystem.FileSystem
+@@ -123,27 +88,10 @@ export default Runtime.handler(Commands, (input) =>
+         get: () => runPromise(config.get()),
+         update: (update) => runPromise(config.update(update)),
+       },
+-      updater: {
+-        remote: requestedServer !== undefined,
+-        subscribe: (notify) => {
+-          if (latest) notify(latest)
+-          resultListeners.add(notify)
+-          return () => resultListeners.delete(notify)
+-        },
+-        check: (signal, notify) => {
+-          if (installing) notify(installing)
+-          installListeners.add(notify)
+-          return runPromise(checking.withPermits(1)(updater.check()), { signal }).finally(() =>
+-            installListeners.delete(notify),
+-          )
+-        },
+-        apply: (version) => runPromise(checking.withPermits(1)(updater.apply(version))),
+-      },
+       packages: {
+         prepare: (spec, install = true) => runPromise(install ? npm.add(spec) : npm.resolve(spec)),
+       },
+       environment: requestedServer === undefined ? Env.session() : undefined,
+-      terminalHandoff: () => preflight.finish(),
+       log: (level, message, tags) => {
+         const effect =
+           level === "debug"
+diff --git a/packages/cli/src/commands/handlers/uninstall.ts b/packages/cli/src/commands/handlers/uninstall.ts
+index 7f6393c..6c3fc29 100644
+--- a/packages/cli/src/commands/handlers/uninstall.ts
++++ b/packages/cli/src/commands/handlers/uninstall.ts
+@@ -7,7 +7,7 @@ import { Commands } from "../commands"
+ import { Runtime } from "../../framework/runtime"
+ import { ServerConnection } from "../../services/server-connection"
+ import { RetainedImage } from "../../services/retained-image"
+-import { Updater } from "../../services/updater"
++import { InstallMethod } from "../../services/install-method"
+ import { handlePromptErrors, prompt, requireInteractive } from "../../ui/prompt"
+ import { errorMessage } from "../../util/error"
+ 
+@@ -17,9 +17,9 @@ export default Runtime.handler(
+     intro("Uninstall OpenCode")
+     const fs = yield* FileSystem.FileSystem
+     const global = yield* Global.Service
+-    const updater = yield* Updater.Service
+-    const method = yield* updater.method()
+-    const removal = method ? updater.removal(method) : undefined
++    const installMethod = yield* InstallMethod.Service
++    const method = yield* installMethod.method()
++    const removal = method ? installMethod.removal(method) : undefined
+     // Data, config, and state hold sessions, credentials, settings, and prompt history; uninstall only removes the cache.
+     // All channels share the cache. Stop background services before deleting it.
+     // Read registrations directly: ServiceConfig.options() can migrate files even during a dry run.
+diff --git a/packages/cli/src/commands/handlers/upgrade.ts b/packages/cli/src/commands/handlers/upgrade.ts
+deleted file mode 100644
+index af7c221..0000000
+--- a/packages/cli/src/commands/handlers/upgrade.ts
++++ /dev/null
+@@ -1,81 +0,0 @@
+-import { intro, log, outro, spinner } from "@clack/prompts"
+-import { Effect, Option } from "effect"
+-import { Commands } from "../commands"
+-import { Runtime } from "../../framework/runtime"
+-import { Updater } from "../../services/updater"
+-import { handlePromptErrors } from "../../ui/prompt"
+-import { OPENCODE_VERSION } from "../../version"
+-import { stripVTControlCharacters } from "node:util"
+-
+-export default Runtime.handler(
+-  Commands.commands.upgrade,
+-  Effect.fn("cli.upgrade")(
+-    function* (input) {
+-      intro("Upgrade")
+-      const updater = yield* Updater.Service
+-      const method = Option.getOrUndefined(input.method) ?? (yield* updater.method())
+-      if (!method)
+-        return yield* Effect.fail(
+-          new Error("Could not detect the installation method. Pass --method to choose how to upgrade OpenCode."),
+-        )
+-
+-      log.info(`Using method: ${method}`)
+-      const target = Option.getOrUndefined(input.target) ?? (yield* updater.latest(method))
+-      const version = target.trim().replace(/^v/, "")
+-      if (version === OPENCODE_VERSION) {
+-        log.warn(`OpenCode upgrade skipped: ${version} is already installed`)
+-        outro("Done")
+-        return
+-      }
+-
+-      log.info(`From ${OPENCODE_VERSION} → ${version}`)
+-      const progress = spinner()
+-      progress.start("Upgrading...")
+-      yield* updater.upgrade(method, target).pipe(
+-        Effect.tap(() => Effect.sync(() => progress.stop("Upgrade complete"))),
+-        Effect.tapCause(() => Effect.sync(() => progress.stop("Upgrade failed", 1))),
+-      )
+-      outro("Done")
+-    },
+-    (effect) =>
+-      handlePromptErrors(
+-        effect.pipe(
+-          Effect.mapError((error) =>
+-            error instanceof Updater.UpgradeError ? new Error(formatUpgradeError(error), { cause: error }) : error,
+-          ),
+-        ),
+-      ),
+-  ),
+-)
+-
+-function formatUpgradeError(error: Updater.UpgradeError) {
+-  const clean = (value: string) => stripVTControlCharacters(value).replaceAll("\r", "").trim()
+-  const line = (value: string) => clean(value).replace(/\s+/g, " ")
+-  const detail = wrap(clean(error.detail), Math.max(24, (process.stdout.columns ?? 80) - 7)).join("\n")
+-  return [
+-    line(error.title),
+-    "",
+-    detail,
+-    ...(error.command ? ["", field("Command", line(error.command))] : []),
+-    field("Retry", line(error.retry)),
+-  ].join("\n")
+-}
+-
+-function field(label: string, value: string) {
+-  const prefix = label.padEnd(9)
+-  const width = Math.max(24, Math.min(61, (process.stdout.columns ?? 80) - prefix.length - 10))
+-  const lines = wrap(value, width)
+-  return lines.map((line, index) => `${index === 0 ? prefix : " ".repeat(prefix.length)}${line}`).join("\n")
+-}
+-
+-function wrap(value: string, width: number) {
+-  return value.split("\n").flatMap((source) => {
+-    if (source.length <= width) return [source]
+-    return source.split(/\s+/).reduce<string[]>((result, word) => {
+-      const index = result.length - 1
+-      if (index < 0 || result[index].length + word.length + 1 > width) result.push(word)
+-      else result[index] += ` ${word}`
+-      return result
+-    }, [])
+-  })
+-}
+diff --git a/packages/cli/src/framework/runtime.ts b/packages/cli/src/framework/runtime.ts
+index 3df1f07..580c1ad 100644
+--- a/packages/cli/src/framework/runtime.ts
++++ b/packages/cli/src/framework/runtime.ts
+@@ -3,7 +3,7 @@ import { Command } from "effect/cli"
+ import { PrintLogs } from "../commands/commands"
+ import { Spec } from "./spec"
+ import { Global } from "@opencode/util/global"
+-import { Updater } from "../services/updater"
++import { InstallMethod } from "../services/install-method"
+ import { Config } from "../config"
+ import { Npm } from "@opencode/util/npm"
+ 
+@@ -19,7 +19,7 @@ type RuntimeHandler = (
+ ) => Effect.Effect<
+   void,
+   unknown,
+-  FileSystem.FileSystem | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
++  FileSystem.FileSystem | Global.Service | Npm.Service | InstallMethod.Service | Config.Service | Scope.Scope
+ >
+ type Loader<Node extends Spec.Any> = () => Promise<{
+   default: (
+@@ -27,7 +27,7 @@ type Loader<Node extends Spec.Any> = () => Promise<{
+   ) => Effect.Effect<
+     void,
+     any,
+-    FileSystem.FileSystem | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
++    FileSystem.FileSystem | Global.Service | Npm.Service | InstallMethod.Service | Config.Service | Scope.Scope
+   >
+ }>
+ type ProvidedCommand = Command.Command<
+@@ -35,7 +35,7 @@ type ProvidedCommand = Command.Command<
+   unknown,
+   unknown,
+   unknown,
+-  FileSystem.FileSystem | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
++  FileSystem.FileSystem | Global.Service | Npm.Service | InstallMethod.Service | Config.Service | Scope.Scope
+ >
+ 
+ export type Handlers<Node extends Spec.Any> = keyof Node["commands"] extends never
+diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
+index 7be0cfc..0f73c5b 100755
+--- a/packages/cli/src/index.ts
++++ b/packages/cli/src/index.ts
+@@ -7,7 +7,7 @@ import { defaultTeardown, getErrorReported } from "effect/Runtime"
+ import { Commands } from "./commands/commands"
+ import { Runtime } from "./framework/runtime"
+ import { Observability } from "@opencode/util/observability"
+-import { Updater } from "./services/updater"
++import { InstallMethod } from "./services/install-method"
+ import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_LOCAL, OPENCODE_VERSION } from "./version"
+ import { LayerNode } from "@opencode/util/effect/layer-node"
+ import { Global } from "@opencode/util/global"
+@@ -49,7 +49,6 @@ let terminated = false
+ 
+ const Handlers = Runtime.handlers(Commands, {
+   $: () => import("./commands/handlers/default"),
+-  upgrade: () => import("./commands/handlers/upgrade"),
+   uninstall: () => import("./commands/handlers/uninstall"),
+   api: () => import("./commands/handlers/api"),
+   auth: {
+@@ -141,7 +140,7 @@ Effect.gen(function* () {
+   ),
+   Effect.annotateLogs({ role: "cli" }),
+   Effect.provide(Config.layer),
+-  Effect.provide(Updater.layer),
++  Effect.provide(InstallMethod.layer),
+   Effect.provide(
+     LayerNode.compile(LayerNode.group([Global.node, AppProcess.node, Npm.node, EffectFlock.node]), {
+       replacements: [
+diff --git a/packages/cli/src/services/install-method.ts b/packages/cli/src/services/install-method.ts
+new file mode 100644
+index 0000000..fdd261d
+--- /dev/null
++++ b/packages/cli/src/services/install-method.ts
+@@ -0,0 +1,190 @@
++import { Global } from "@opencode/util/global"
++import { AppProcess } from "@opencode/util/process"
++import { Context, Duration, Effect, FileSystem, Layer, Option, Schema } from "effect"
++import { ChildProcess } from "effect/process"
++import path from "node:path"
++import { stripVTControlCharacters } from "node:util"
++import { RetainedImage } from "./retained-image"
++
++export const methods = ["curl", "npm", "pnpm", "bun", "yarn", "vp", "brew", "winget"] as const
++
++export type Method = (typeof methods)[number]
++
++const decodeVpPackages = Schema.decodeUnknownOption(
++  Schema.fromJsonString(Schema.Array(Schema.Struct({ name: Schema.String }))),
++)
++
++const wingetPackage = "Anomaly.OpenCode"
++const wingetArgs = [
++  "--id",
++  wingetPackage,
++  "--exact",
++  "--source",
++  "winget",
++  "--accept-source-agreements",
++  "--disable-interactivity",
++]
++
++function conciseDetail(input: string) {
++  const lines = stripVTControlCharacters(input)
++    .trim()
++    .replaceAll("\r", "\n")
++    .split("\n")
++    .map((line) => line.trimEnd())
++    .filter((line) => line.trim().length > 0)
++  const tail = lines.slice(-12).join("\n")
++  const clipped = tail.length > 2_000
++  const detail = clipped ? `…${tail.slice(-1_999)}` : tail
++  if (!detail) return
++  if (lines.length <= 12 && !clipped) return detail
++  return `${detail}\n\nOutput shortened to the last 12 lines.`
++}
++
++function resultDetail(result: { code: number; stdout: string; stderr: string }) {
++  return (
++    conciseDetail(result.stderr) ??
++    conciseDetail(result.stdout) ??
++    `The command exited with code ${result.code} without any error output.`
++  )
++}
++
++export interface Interface {
++  readonly method: () => Effect.Effect<Method | undefined>
++  readonly removal: (
++    method: Method,
++  ) => { readonly command: ReadonlyArray<string>; readonly run: Effect.Effect<void, Error> } | undefined
++}
++
++export class Service extends Context.Service<Service, Interface>()("@opencode/cli/InstallMethod") {}
++
++const make = Effect.gen(function* () {
++  const fs = yield* FileSystem.FileSystem
++  const global = yield* Global.Service
++  const appProcess = yield* AppProcess.Service
++  const executable = yield* fs.realPath(process.execPath).pipe(Effect.orElseSucceed(() => process.execPath))
++  const installedPackage = yield* Effect.gen(function* () {
++    const directory = path.dirname(path.dirname(executable))
++    const manifest: { name: string; bin?: Record<string, string> } = yield* fs
++      .readFileString(path.join(directory, "package.json"))
++      .pipe(Effect.flatMap((text) => Effect.try(() => JSON.parse(text))))
++    // Source invocations run inside Bun or Node, which may themselves be npm packages.
++    if (!/^@opencode(?:-ai)?\/cli(?:-node)?$/.test(manifest.name)) return
++    if (Object.values(manifest.bin ?? {}).some((bin) => path.resolve(directory, bin) === executable))
++      return manifest.name
++  }).pipe(Effect.orElseSucceed(() => undefined))
++  // "opencode" is Homebrew Core's formula; the others are published to anomalyco/tap.
++  const installedFormula = ["opencode", "opencode-beta", "opencode-v2"].find((name) =>
++    executable.includes(`${path.sep}Cellar${path.sep}${name}${path.sep}`),
++  )
++  // WinGet extracts portable packages into a directory named after the package identifier.
++  const installedWinget = /[\\/]winget[\\/]packages[\\/]anomaly\.opencode_/i.test(executable)
++
++  const exec = Effect.fnUntraced(function* (command: string[], timeout: Duration.Input = "30 seconds") {
++    return yield* appProcess
++      .run(ChildProcess.make(command[0], command.slice(1)), {
++        timeout,
++        maxOutputBytes: 100_000,
++        maxErrorBytes: 100_000,
++      })
++      .pipe(
++        Effect.map((result) => ({
++          code: result.exitCode,
++          stdout: result.stdout.toString("utf8"),
++          stderr: result.stderr.toString("utf8"),
++        })),
++      )
++  })
++
++  const curlPath = path.resolve(
++    global.home,
++    ".opencode",
++    "bin",
++    process.platform === "win32" ? "opencode.exe" : "opencode",
++  )
++  const curlBinary = yield* fs.realPath(curlPath).pipe(Effect.orElseSucceed(() => curlPath))
++
++  const method = Effect.fnUntraced(function* () {
++    if (executable === curlBinary) return "curl"
++    if (installedFormula) return "brew"
++    if (installedWinget) return "winget"
++    if (!installedPackage) return
++
++    const parts = executable.toLowerCase().split(path.sep).map((part) => part.replace(/^\./, ""))
++    const checks: Array<{ method: Method; command: string[] }> = [
++      { method: "npm", command: ["npm", "list", "-g", "--depth=0", installedPackage] },
++      { method: "pnpm", command: ["pnpm", "list", "-g", "--depth=0", installedPackage] },
++      { method: "bun", command: ["bun", "pm", "ls", "-g"] },
++      { method: "yarn", command: ["yarn", "global", "list"] },
++      { method: "vp", command: ["vp", "list", "-g", "--json", installedPackage] },
++    ]
++    checks.sort((a, b) => Number(parts.includes(b.method)) - Number(parts.includes(a.method)))
++    const results = yield* Effect.forEach(
++      checks,
++      (check) =>
++        exec(check.command).pipe(
++          Effect.orElseSucceed(() => ({ code: 1, stdout: "", stderr: "" })),
++          Effect.map((result) => ({ check, result })),
++        ),
++      { concurrency: "unbounded" },
++    )
++    return results.find((result) => {
++      if (result.check.method !== "vp") return result.result.stdout.includes(installedPackage)
++      // Vite+ repeats the filter in its successful no-match message, so substring detection would be a false positive.
++      return Option.exists(decodeVpPackages(result.result.stdout), (packages) =>
++        packages.some((item) => item.name === installedPackage),
++      )
++    })?.check.method
++  })
++
++  const removalCommand = (method: Method) => {
++    if (method === "winget") return ["winget", "uninstall", ...wingetArgs]
++    if (method === "curl" || method === "brew" || !installedPackage) return undefined
++    const commands = {
++      npm: ["npm", "uninstall", "--global", installedPackage],
++      pnpm: ["pnpm", "remove", "--global", installedPackage],
++      bun: ["bun", "remove", "--global", installedPackage],
++      yarn: ["yarn", "global", "remove", installedPackage],
++      vp: ["vp", "uninstall", "-g", installedPackage],
++    }
++    return commands[method]
++  }
++
++  const removal = (method: Method) => {
++    const command = removalCommand(method)
++    if (!command) return undefined
++    return {
++      command,
++      run: retaining(
++        method,
++        exec(command, "5 minutes").pipe(
++          Effect.flatMap((result) => (result.code === 0 ? Effect.void : Effect.fail(new Error(resultDetail(result))))),
++        ),
++        global.tmp,
++      ),
++    }
++  }
++
++  // On Windows a package operation must delete or replace the running binary, which only works
++  // while another link to it exists (see RetainedImage). The link is normally kept in the
++  // cache; uninstall has already removed the cache, so it uses the temporary directory.
++  const retaining = <A, E, R>(method: Method, effect: Effect.Effect<A, E, R>, directory = global.cache) => {
++    if (process.platform !== "win32" || method === "brew") return effect
++    // Only the installed binary is at stake; source checkouts run inside bun or node.
++    const owned =
++      method === "curl"
++        ? executable === curlBinary
++        : method === "winget"
++          ? installedWinget
++          : installedPackage !== undefined
++    if (!owned) return effect
++    return Effect.scoped(RetainedImage.retain(directory, "removal").pipe(Effect.andThen(effect))).pipe(
++      Effect.provideService(FileSystem.FileSystem, fs),
++    )
++  }
++
++  return Service.of({ method, removal })
++})
++
++export const layer = Layer.effect(Service, make)
++
++export * as InstallMethod from "./install-method"
+diff --git a/packages/cli/src/services/retained-image.ts b/packages/cli/src/services/retained-image.ts
+index ef1521a..9720a63 100644
+--- a/packages/cli/src/services/retained-image.ts
++++ b/packages/cli/src/services/retained-image.ts
+@@ -9,10 +9,10 @@ import path from "node:path"
+ // so a process that must survive an installer keeps a second link to its own image while it
+ // runs. Windows reuses process IDs quickly, so names carry a random suffix and only links of
+ // processes that no longer exist are swept.
+-const pattern = /^opencode-(?:service|upgrade)-(\d+)-[0-9a-f]+\.exe$/
++const pattern = /^opencode-(?:service|removal)-(\d+)-[0-9a-f]+\.exe$/
+ 
+ /** Hold a second link to the running image in `directory` for the lifetime of the scope. */
+-export const retain = Effect.fnUntraced(function* (directory: string, role: "service" | "upgrade") {
++export const retain = Effect.fnUntraced(function* (directory: string, role: "service" | "removal") {
+   const fs = yield* FileSystem.FileSystem
+   return yield* Effect.acquireRelease(
+     Effect.gen(function* () {
+diff --git a/packages/cli/src/services/update-preflight.tsx b/packages/cli/src/services/update-preflight.tsx
+deleted file mode 100644
+index 4bd02a2..0000000
+--- a/packages/cli/src/services/update-preflight.tsx
++++ /dev/null
+@@ -1,473 +0,0 @@
+-/** @jsxImportSource @opentui/solid */
+-// Split-footer status shown while a freshly launched CLI replaces a
+-// version-mismatched background service before the TUI attaches.
+-import { createCliRenderer, RGBA, TextAttributes, type CliRenderer } from "@opentui/core"
+-import { render, useTerminalDimensions } from "@opentui/solid"
+-import { OPENCODE_VERSION } from "../version"
+-import "@opencode/tui/component/spinner-renderable"
+-import { SPINNER_FRAMES } from "@opencode/tui/component/spinner"
+-import { go } from "@opencode/tui/logo"
+-import { setTimeout } from "node:timers/promises"
+-import {
+-  batch,
+-  createEffect,
+-  createMemo,
+-  createSignal,
+-  For,
+-  Index,
+-  on,
+-  onCleanup,
+-  onMount,
+-  Show,
+-  untrack,
+-} from "solid-js"
+-
+-const stages = ["Keeping your session safe", "Starting the new background service", "Loading OpenCode"] as const
+-const stageFloor = 480
+-const transitionDuration = 420
+-const completionHold = 650
+-
+-export type Handle = {
+-  readonly begin: (from?: string) => boolean
+-  readonly loading: () => void
+-  readonly finish: () => Promise<undefined>
+-  readonly fail: (message: string) => Promise<void>
+-  readonly close: () => Promise<void>
+-}
+-
+-export const make = (): Handle => {
+-  let session: Promise<Session | undefined> | undefined
+-  return {
+-    begin: (from) => {
+-      if (!process.stdout.isTTY || !process.stdin.isTTY) return false
+-      session ??= open(from).catch(() => {
+-        process.stderr.write("Restarting background server (version mismatch)...\n")
+-        return undefined
+-      })
+-      return true
+-    },
+-    loading: () => {
+-      void session?.then((active) => active?.loading())
+-    },
+-    finish: async () => {
+-      const active = await session
+-      return active?.finish()
+-    },
+-    fail: async (message) => {
+-      const active = await session
+-      await active?.fail(message)
+-    },
+-    close: async () => {
+-      const active = await session
+-      await active?.close()
+-    },
+-  }
+-}
+-
+-type Session = {
+-  readonly loading: () => Promise<void>
+-  readonly finish: () => Promise<undefined>
+-  readonly fail: (message: string) => Promise<void>
+-  readonly close: () => Promise<void>
+-}
+-
+-async function open(from?: string): Promise<Session> {
+-  const [active, setActive] = createSignal(0)
+-  const [outcome, setOutcome] = createSignal<"running" | "success" | "failure">("running")
+-  const [failure, setFailure] = createSignal("")
+-  const [animating, setAnimating] = createSignal(true)
+-  let resolveOutcome: (() => void) | undefined
+-  const renderer = await createCliRenderer({
+-    stdin: process.stdin,
+-    useMouse: false,
+-    autoFocus: false,
+-    openConsoleOnError: false,
+-    exitOnCtrlC: false,
+-    screenMode: "split-footer",
+-    footerHeight: 4,
+-    targetFps: 60,
+-    useKittyKeyboard: {},
+-    consoleOptions: {
+-      keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
+-    },
+-    externalOutputMode: "capture-stdout",
+-    consoleMode: "disabled",
+-  })
+-  await render(
+-    () => (
+-      <UpdateFooter
+-        from={from}
+-        active={active}
+-        outcome={outcome}
+-        failure={failure}
+-        animating={animating}
+-        renderer={renderer}
+-        onOutcomeSettled={() => resolveOutcome?.()}
+-      />
+-    ),
+-    renderer,
+-  ).catch(async (error) => {
+-    if (!renderer.isDestroyed) renderer.destroy()
+-    await renderer.closed
+-    throw error
+-  })
+-  let shownAt = performance.now()
+-  const waitForStage = async () => {
+-    const remaining = stageFloor - (performance.now() - shownAt)
+-    if (remaining > 0) await setTimeout(remaining)
+-  }
+-  const advance = async (stage: number) => {
+-    await waitForStage()
+-    if (outcome() !== "running") return
+-    setActive(stage)
+-    shownAt = performance.now()
+-  }
+-  // Service.start currently exposes only its start boundary, so this first
+-  // transition is time-based. Finer lifecycle callbacks remain follow-up work.
+-  const auto = advance(1)
+-  const transitionTo = async (next: "success" | "failure", hold: number) => {
+-    const settled = Promise.withResolvers<void>()
+-    resolveOutcome = settled.resolve
+-    setOutcome(next)
+-    const completed = await Promise.race([
+-      settled.promise.then(() => true),
+-      setTimeout(transitionDuration + 500).then(() => false),
+-    ])
+-    resolveOutcome = undefined
+-    setAnimating(false)
+-    if (completed) await setTimeout(hold)
+-  }
+-  let closing: Promise<void> | undefined
+-  const close = () =>
+-    (closing ??= (async () => {
+-      setAnimating(false)
+-      // closed rejects when the terminal is gone or the final flush times out; nothing is left to restore.
+-      if (renderer.isDestroyed) return renderer.closed.catch(() => {})
+-      renderer.pause()
+-      await Promise.race([renderer.idle(), setTimeout(500)])
+-      renderer.destroy()
+-      await renderer.closed.catch(() => {})
+-    })())
+-  let loading: Promise<void> | undefined
+-  const load = () =>
+-    (loading ??= (async () => {
+-      await auto
+-      await advance(2)
+-    })())
+-  let settled: Promise<void> | undefined
+-  const settle = (task: () => Promise<void>) => (settled ??= task())
+-  return {
+-    loading: load,
+-    finish: async () => {
+-      await settle(async () => {
+-        await load()
+-        await waitForStage()
+-        await transitionTo("success", completionHold)
+-      })
+-      await close()
+-      return undefined
+-    },
+-    fail: (message) =>
+-      settle(async () => {
+-        setFailure(message)
+-        await transitionTo("failure", 250)
+-        await close()
+-      }),
+-    close,
+-  }
+-}
+-
+-const colors = {
+-  accent: RGBA.fromHex("#a6b8ff"),
+-  accentBright: RGBA.fromHex("#eef1ff"),
+-  accentDim: RGBA.fromHex("#596998"),
+-  error: RGBA.fromHex("#ff8192"),
+-  muted: RGBA.fromHex("#808080"),
+-  success: RGBA.fromHex("#8bd5a5"),
+-  text: RGBA.fromHex("#eeeeee"),
+-}
+-
+-const monogram = go.right.slice(1)
+-const sweepBlend = 8
+-const textDim = RGBA.fromHex("#4c4c4c")
+-const rampSteps = 32
+-
+-const blend = (from: RGBA, to: RGBA, amount: number) =>
+-  RGBA.fromValues(
+-    from.r + (to.r - from.r) * amount,
+-    from.g + (to.g - from.g) * amount,
+-    from.b + (to.b - from.b) * amount,
+-  )
+-const ramp = (from: RGBA, to: RGBA) =>
+-  Array.from({ length: rampSteps + 1 }, (_, step) => blend(from, to, step / rampSteps))
+-const railRamp = ramp(colors.accentDim, colors.accentBright)
+-const monogramRamp = ramp(colors.muted, colors.accent)
+-const rampCache = new Map<RGBA, ReadonlyArray<RGBA>>()
+-const rampFor = (color: RGBA) => {
+-  const cached = rampCache.get(color)
+-  if (cached) return cached
+-  const result = ramp(textDim, color)
+-  rampCache.set(color, result)
+-  return result
+-}
+-const shade = (palette: ReadonlyArray<RGBA>, brightness: number) =>
+-  palette[Math.round(Math.max(0, Math.min(1, brightness)) * rampSteps)]
+-
+-type Cell = { readonly char: string; readonly color: RGBA; readonly bold?: boolean }
+-const styled = (text: string, color: RGBA, bold?: boolean): Cell[] =>
+-  Array.from(text).map((char) => ({ char, color, bold }))
+-const phrase = (...segments: ReadonlyArray<readonly [string, RGBA, boolean?]>): Cell[] =>
+-  segments.flatMap((segment, index) => [
+-    ...(index > 0 ? styled(" ", colors.muted) : []),
+-    ...styled(segment[0], segment[1], segment[2]),
+-  ])
+-
+-function Monogram(props: { ink: () => RGBA }) {
+-  const shadow = createMemo(() => {
+-    const ink = props.ink()
+-    return RGBA.fromValues(ink.r * 0.25, ink.g * 0.25, ink.b * 0.25)
+-  })
+-  return (
+-    <box flexDirection="column">
+-      <For each={monogram}>
+-        {(line) => (
+-          <box flexDirection="row">
+-            <For each={Array.from(line)}>
+-              {(char) =>
+-                char === "_" ? (
+-                  <text bg={shadow()} selectable={false}>
+-                    {" "}
+-                  </text>
+-                ) : (
+-                  <text fg={props.ink()} selectable={false}>
+-                    {char}
+-                  </text>
+-                )
+-              }
+-            </For>
+-          </box>
+-        )}
+-      </For>
+-    </box>
+-  )
+-}
+-
+-type CellTransition = { from: Cell[]; to: Cell[]; done?: () => void }
+-
+-function createTransition(render: (transition: CellTransition, progress: number) => Cell[]) {
+-  const [state, setState] = createSignal<{ from: Cell[]; to: Cell[]; done?: () => void } | undefined>()
+-  const [progress, setProgress] = createSignal(0)
+-  let elapsed = 0
+-  const cells = createMemo(() => {
+-    const transition = state()
+-    if (!transition) return undefined
+-    return render(transition, progress())
+-  })
+-  return {
+-    start(from: Cell[], to: Cell[], done?: () => void) {
+-      elapsed = 0
+-      setProgress(0)
+-      setState({ from, to, done })
+-    },
+-    tick(deltaTime: number) {
+-      const transition = state()
+-      if (!transition) return
+-      elapsed = Math.min(transitionDuration, elapsed + deltaTime)
+-      setProgress(elapsed / transitionDuration)
+-      if (elapsed < transitionDuration) return
+-      setState(undefined)
+-      transition.done?.()
+-    },
+-    cells,
+-    progress,
+-  }
+-}
+-
+-const createSweep = () =>
+-  createTransition((transition, progress) => {
+-    const length = Math.max(transition.from.length, transition.to.length)
+-    const front = smoothstep(progress) * (length + 2 * sweepBlend) - sweepBlend
+-    return Array.from({ length }, (_, index) => {
+-      const passed = Math.max(0, Math.min(1, (front - index) / sweepBlend))
+-      const brightness = smoothstep(Math.abs(passed * 2 - 1))
+-      const cell = (passed >= 0.5 ? transition.to[index] : transition.from[index]) ?? {
+-        char: " ",
+-        color: colors.text,
+-      }
+-      return { ...cell, color: shade(rampFor(cell.color), brightness) }
+-    })
+-  })
+-
+-const createFade = () =>
+-  createTransition((transition, progress) => {
+-    const entering = progress >= 0.5
+-    const brightness = smoothstep(entering ? progress * 2 - 1 : 1 - progress * 2)
+-    return (entering ? transition.to : transition.from).map((cell) => ({
+-      ...cell,
+-      color: shade(rampFor(cell.color), brightness),
+-    }))
+-  })
+-
+-const smoothstep = (value: number) => value * value * (3 - 2 * value)
+-const frameDone = Promise.resolve()
+-
+-function UpdateFooter(props: {
+-  from?: string
+-  active: () => number
+-  outcome: () => "running" | "success" | "failure"
+-  failure: () => string
+-  animating: () => boolean
+-  renderer: CliRenderer
+-  onOutcomeSettled: () => void
+-}) {
+-  const term = useTerminalDimensions()
+-  const [position, setPosition] = createSignal(0)
+-  const [pulse, setPulse] = createSignal(0)
+-  const headerFade = createFade()
+-  const statusSweep = createSweep()
+-  const runningHeader = () =>
+-    phrase(
+-      ["OpenCode", colors.muted, true],
+-      ["is updating", colors.muted],
+-      ...(props.from
+-        ? ([
+-            ["from", colors.muted],
+-            [props.from, colors.accentDim],
+-          ] as const)
+-        : []),
+-      ["to", colors.muted],
+-      [OPENCODE_VERSION, colors.accent],
+-    )
+-  const completedHeader = phrase(
+-    ["OpenCode", colors.muted, true],
+-    ["updated to", colors.muted],
+-    [OPENCODE_VERSION, colors.accent],
+-  )
+-  const pausedHeader = phrase(["OpenCode", colors.muted, true], ["update paused", colors.muted])
+-  const outcomeStatus = () =>
+-    props.outcome() === "success"
+-      ? [...styled("✓", colors.success), ...styled(" Ready", colors.text)]
+-      : [...styled("!", colors.error), ...styled(" " + props.failure(), colors.text)]
+-  let previousStage: string = stages[0]
+-  createEffect(
+-    on(props.active, (index) => {
+-      if (props.outcome() !== "running") return
+-      const next = stages[index]
+-      if (next === previousStage) return
+-      statusSweep.start(styled(previousStage, colors.text), styled(next, colors.text))
+-      previousStage = next
+-    }),
+-  )
+-  createEffect(
+-    on(
+-      props.outcome,
+-      (outcome) => {
+-        if (outcome === "running") return
+-        const visibleStatus = untrack(statusSweep.cells) ?? styled(previousStage, colors.text)
+-        headerFade.start(runningHeader(), outcome === "success" ? completedHeader : pausedHeader)
+-        statusSweep.start([...styled("  ", colors.text), ...visibleStatus], outcomeStatus(), props.onOutcomeSettled)
+-      },
+-      { defer: true },
+-    ),
+-  )
+-  const header = createMemo(
+-    () =>
+-      headerFade.cells() ??
+-      (props.outcome() === "success"
+-        ? completedHeader
+-        : props.outcome() === "failure"
+-          ? pausedHeader
+-          : runningHeader()),
+-  )
+-  const monogramInk = createMemo(() =>
+-    props.outcome() === "success" ? shade(monogramRamp, smoothstep(headerFade.progress())) : colors.muted,
+-  )
+-  const rail = createMemo(() => {
+-    const width = Math.max(0, Math.min(30, term().width - 39))
+-    if (width === 0) return []
+-    const filled = Math.round(position() * width)
+-    const glowRadius = 6
+-    const span = Math.max(1, filled + glowRadius * 2)
+-    const center = pulse() * span - glowRadius
+-    const success = props.outcome() === "success"
+-    const completion = smoothstep(headerFade.progress())
+-    return Array.from({ length: width }, (_, index) => {
+-      const color =
+-        index >= filled ? colors.muted : shade(railRamp, Math.max(0, 1 - Math.abs(index - center) / glowRadius) ** 2)
+-      return {
+-        char: success || index < filled ? "━" : "·",
+-        color: success ? blend(color, colors.accent, completion) : color,
+-      }
+-    })
+-  })
+-
+-  onMount(() => {
+-    let value = 0
+-    let velocity = 0
+-    let phase = 0
+-    const frame = (deltaTime: number) => {
+-      if (!props.animating()) return frameDone
+-      const elapsed = Math.min(0.032, deltaTime / 1_000)
+-      const stiffness = 110
+-      const damping = 2 * Math.sqrt(stiffness)
+-      const target = props.outcome() === "success" ? 1 : (props.active() + 1) / stages.length
+-      velocity += (stiffness * (target - value) - damping * velocity) * elapsed
+-      value += velocity * elapsed
+-      phase = (phase + deltaTime / 900) % 1
+-      batch(() => {
+-        setPosition(Math.max(0, Math.min(1, value)))
+-        setPulse(phase)
+-      })
+-      headerFade.tick(deltaTime)
+-      statusSweep.tick(deltaTime)
+-      return frameDone
+-    }
+-    props.renderer.setFrameCallback(frame)
+-    onCleanup(() => props.renderer.removeFrameCallback(frame))
+-  })
+-
+-  return (
+-    <box width="100%" height={4} flexDirection="row" gap={1} paddingLeft={1} live={props.animating()}>
+-      <Monogram ink={monogramInk} />
+-      <box flexDirection="column" flexGrow={1} overflow="hidden">
+-        <CellLine cells={header()} />
+-        <Show
+-          when={props.outcome() === "running"}
+-          fallback={<CellLine cells={statusSweep.cells() ?? outcomeStatus()} />}
+-        >
+-          <box flexDirection="row" gap={1}>
+-            <spinner frames={SPINNER_FRAMES} interval={80} color={colors.accent} />
+-            <CellLine cells={statusSweep.cells() ?? styled(stages[props.active()], colors.text)} />
+-          </box>
+-        </Show>
+-        <box flexDirection="row" gap={1}>
+-          <CellLine cells={rail()} />
+-          <text fg={colors.muted}>
+-            {props.outcome() === "success" ? stages.length : props.active() + 1}/{stages.length}
+-          </text>
+-        </box>
+-      </box>
+-    </box>
+-  )
+-}
+-
+-function CellLine(props: { cells: ReadonlyArray<Cell> }) {
+-  return (
+-    <text truncate>
+-      <Index each={props.cells}>
+-        {(cell) => (
+-          <span
+-            style={{
+-              fg: cell().color,
+-              attributes: cell().bold ? TextAttributes.BOLD : TextAttributes.NONE,
+-            }}
+-          >
+-            {cell().char}
+-          </span>
+-        )}
+-      </Index>
+-    </text>
+-  )
+-}
+-
+-export * as UpdatePreflight from "./update-preflight"
+diff --git a/packages/cli/src/services/updater-action.ts b/packages/cli/src/services/updater-action.ts
+deleted file mode 100644
+index e147f34..0000000
+--- a/packages/cli/src/services/updater-action.ts
++++ /dev/null
+@@ -1,48 +0,0 @@
+-export type Policy = "disable" | "notify" | "auto"
+-export type Action = "none" | "notify" | "auto"
+-
+-const maximumComponent = "9007199254740991"
+-const versionPattern =
+-  /^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
+-
+-export function action(current: string, latest: string, policy: Policy): Action {
+-  if (policy === "disable") return "none"
+-  const currentVersion = parseReleaseVersion(current)
+-  const latestVersion = parseReleaseVersion(latest)
+-  if (!currentVersion || !latestVersion || sameRelease(currentVersion, latestVersion)) return "none"
+-  return policy
+-}
+-
+-export function parseReleaseVersion(input: string) {
+-  if (input.length > 256) return
+-  const match = input.trim().match(versionPattern)
+-  if (!match) return
+-  if ([match[1], match[2], match[3]].some(invalidComponent)) return
+-  if (
+-    match[4]
+-      ?.split(".")
+-      .some((identifier) => identifier.length > 1 && identifier.startsWith("0") && /^[0-9]+$/.test(identifier))
+-  )
+-    return
+-  return {
+-    major: match[1],
+-    core: `${match[1]}.${match[2]}.${match[3]}`,
+-    prerelease: match[4]?.split(".") ?? [],
+-  }
+-}
+-
+-function sameRelease(current: NonNullable<ReturnType<typeof parseReleaseVersion>>, latest: typeof current) {
+-  if (current.core !== latest.core || current.prerelease.length !== latest.prerelease.length) return false
+-  return current.prerelease.every((identifier, index) => {
+-    const other = latest.prerelease[index]
+-    if (identifier === other) return true
+-    // semver compares oversized numeric prerelease identifiers after numeric coercion.
+-    return /^[0-9]+$/.test(identifier) && /^[0-9]+$/.test(other) && Number(identifier) === Number(other)
+-  })
+-}
+-
+-function invalidComponent(value: string) {
+-  if (value.length > 1 && value.startsWith("0")) return true
+-  if (value.length !== maximumComponent.length) return value.length > maximumComponent.length
+-  return value > maximumComponent
+-}
+diff --git a/packages/cli/src/services/updater.test.ts b/packages/cli/src/services/updater.test.ts
+deleted file mode 100644
+index 7a108f6..0000000
+--- a/packages/cli/src/services/updater.test.ts
++++ /dev/null
+@@ -1,87 +0,0 @@
+-import { describe, expect, test } from "bun:test"
+-import { action } from "./updater-action"
+-import { decodePolicy } from "./updater"
+-
+-describe("updater", () => {
+-  test("reads update policy from JSONC", () => {
+-    expect(decodePolicy('{ // preference\n "update": "notify",\n}')).toBe("notify")
+-    expect(decodePolicy('{ "update": "disable" }')).toBe("disable")
+-    expect(decodePolicy('{ "update": "auto" }')).toBe("auto")
+-    expect(decodePolicy('{ "update": "invalid" }')).toBeUndefined()
+-  })
+-
+-  test("maps the v1 update policy", () => {
+-    expect(decodePolicy('{ "autoupdate": false }')).toBe("disable")
+-    expect(decodePolicy('{ "autoupdate": "notify" }')).toBe("notify")
+-    expect(decodePolicy('{ "autoupdate": true }')).toBe("auto")
+-  })
+-
+-  test("reports every available release", () => {
+-    expect(action("1.2.3", "1.2.4", "notify")).toBe("notify")
+-    expect(action("1.2.3", "1.3.0", "notify")).toBe("notify")
+-    expect(action("1.2.3", "2.0.0", "notify")).toBe("notify")
+-    expect(action("1.2.3", "1.2.3", "notify")).toBe("none")
+-  })
+-
+-  test("automatically installs every available release when enabled", () => {
+-    expect(action("1.2.3", "1.2.4", "auto")).toBe("auto")
+-    expect(action("1.2.3", "1.2.3", "auto")).toBe("none")
+-  })
+-
+-  test("skips when updates are disabled", () => {
+-    expect(action("1.2.3", "1.2.4", "disable")).toBe("none")
+-  })
+-
+-  test("reports up-to-date only when versions match", () => {
+-    expect(action("1.2.3", "1.2.3", "notify")).toBe("none")
+-  })
+-
+-  test("reports when latest is lower (rollback)", () => {
+-    expect(action("1.2.4", "1.2.3", "notify")).toBe("notify")
+-  })
+-
+-  test("accepts strict release version variants", () => {
+-    expect(action("v1.2.3", " 1.2.4\n", "notify")).toBe("notify")
+-    expect(action("1.2.3-alpha.1", "1.2.3-alpha.2", "notify")).toBe("notify")
+-    expect(action("0.0.0-dev-17403", "0.0.0-dev-17403.2", "notify")).toBe("notify")
+-    expect(action("0.0.0-next-17403", "0.0.0-beta-17404", "notify")).toBe("notify")
+-    expect(action("1.2.3+old", "1.2.3+new", "notify")).toBe("none")
+-    expect(action("v1.2.3+old", "1.2.3", "notify")).toBe("none")
+-  })
+-
+-  test("preserves strict validity", () => {
+-    const invalid = [
+-      "=1.2.3",
+-      "V1.2.3",
+-      "1.2",
+-      "1.2.3.4",
+-      "01.2.3",
+-      "1.02.3",
+-      "1.2.03",
+-      "1.2.3-01",
+-      "1.2.3-",
+-      "1.2.3+",
+-      "1.2.3-alpha..1",
+-      "1.2.3_alpha",
+-      "9007199254740992.0.0",
+-      "0.9007199254740992.0",
+-      "0.0.9007199254740992",
+-    ]
+-    invalid.forEach((version) => expect(action("1.2.3", version, "notify"), version).toBe("none"))
+-  })
+-
+-  test("handles numeric limits without losing precision", () => {
+-    expect(action("9007199254740991.0.0", "9007199254740991.0.1", "notify")).toBe("notify")
+-    expect(action("9007199254740990.0.0", "9007199254740991.0.0", "notify")).toBe("notify")
+-  })
+-
+-  test("preserves equality for oversized numeric prerelease identifiers", () => {
+-    expect(action("1.0.0-9007199254740992", "1.0.0-9007199254740993", "notify")).toBe("none")
+-    expect(action("1.0.0-9007199254740991", "1.0.0-9007199254740992", "notify")).toBe("notify")
+-  })
+-
+-  test("rejects versions longer than semver's limit before trimming", () => {
+-    expect(action("1.2.3", `${" ".repeat(251)}1.2.3`, "notify")).toBe("none")
+-    expect(action("1.2.3", `1.2.4+${"a".repeat(250)}`, "notify")).toBe("notify")
+-  })
+-})
+diff --git a/packages/cli/src/services/updater.ts b/packages/cli/src/services/updater.ts
+deleted file mode 100644
+index d08e929..0000000
+--- a/packages/cli/src/services/updater.ts
++++ /dev/null
+@@ -1,629 +0,0 @@
+-import { Global } from "@opencode/util/global"
+-import { AppProcess } from "@opencode/util/process"
+-import { EffectFlock } from "@opencode/util/effect-flock"
+-import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_LOCAL, OPENCODE_VERSION } from "../version"
+-import { Context, Duration, Effect, FileSystem, Layer, Option, Ref, Schema } from "effect"
+-import { ChildProcess } from "effect/process"
+-import { parse, type ParseError } from "jsonc-parser"
+-import path from "node:path"
+-import { stripVTControlCharacters } from "node:util"
+-import { RetainedImage } from "./retained-image"
+-import { action, parseReleaseVersion, type Policy } from "./updater-action"
+-import { errorMessage } from "../util/error"
+-
+-export const methods = ["curl", "npm", "pnpm", "bun", "yarn", "vp", "brew", "winget"] as const
+-
+-export type Method = (typeof methods)[number]
+-export type RunResult = { readonly type: "available" | "installed"; readonly version: string }
+-export type CheckResult = RunResult | { readonly type: "unavailable"; readonly message: string }
+-
+-export class UpgradeError extends Error {
+-  readonly title: string
+-  readonly detail: string
+-  readonly command?: string
+-  readonly retry: string
+-
+-  constructor(
+-    input: {
+-      readonly title: string
+-      readonly detail: string
+-      readonly command?: string
+-      readonly retry: string
+-    },
+-    options?: ErrorOptions,
+-  ) {
+-    super(input.detail, options)
+-    this.name = "UpgradeError"
+-    this.title = input.title
+-    this.detail = input.detail
+-    this.command = input.command
+-    this.retry = input.retry
+-  }
+-}
+-
+-const decodeVpPackages = Schema.decodeUnknownOption(
+-  Schema.fromJsonString(Schema.Array(Schema.Struct({ name: Schema.String }))),
+-)
+-
+-const installNames: Record<Method, string> = {
+-  curl: "The OpenCode installer",
+-  npm: "npm",
+-  pnpm: "pnpm",
+-  bun: "Bun",
+-  yarn: "Yarn",
+-  vp: "Vite+",
+-  brew: "Homebrew",
+-  winget: "WinGet",
+-}
+-
+-const wingetPackage = "Anomaly.OpenCode"
+-const wingetArgs = [
+-  "--id",
+-  wingetPackage,
+-  "--exact",
+-  "--source",
+-  "winget",
+-  "--accept-source-agreements",
+-  "--disable-interactivity",
+-]
+-
+-function conciseDetail(input: string) {
+-  const lines = stripVTControlCharacters(input)
+-    .trim()
+-    .replaceAll("\r", "\n")
+-    .split("\n")
+-    .map((line) => line.trimEnd())
+-    .filter((line) => line.trim().length > 0)
+-  const tail = lines.slice(-12).join("\n")
+-  const clipped = tail.length > 2_000
+-  const detail = clipped ? `…${tail.slice(-1_999)}` : tail
+-  if (!detail) return
+-  if (lines.length <= 12 && !clipped) return detail
+-  return `${detail}\n\nOutput shortened to the last 12 lines.`
+-}
+-
+-function errorDetail(cause: unknown): string {
+-  if (cause instanceof AppProcess.AppProcessError) {
+-    const stderr = conciseDetail(cause.stderr ?? "")
+-    if (stderr) return stderr
+-    if (cause.cause !== undefined) return errorDetail(cause.cause)
+-    return cause.message
+-  }
+-  if (cause instanceof Error) {
+-    const detail = cause.cause === undefined ? undefined : errorDetail(cause.cause)
+-    if (!detail || detail === cause.message) return cause.message
+-    return `${cause.message}: ${detail}`
+-  }
+-  return errorMessage(cause)
+-}
+-
+-function resultDetail(result: { code: number; stdout: string; stderr: string }) {
+-  return (
+-    conciseDetail(result.stderr) ??
+-    conciseDetail(result.stdout) ??
+-    `The command exited with code ${result.code} without any error output.`
+-  )
+-}
+-
+-export interface Interface {
+-  readonly run: (onInstall?: (version: string) => void) => Effect.Effect<RunResult | undefined>
+-  readonly check: () => Effect.Effect<CheckResult | undefined, Error>
+-  readonly apply: (version: string) => Effect.Effect<void, Error>
+-  readonly method: () => Effect.Effect<Method | undefined>
+-  readonly latest: (method?: Method) => Effect.Effect<string, Error>
+-  readonly upgrade: (method: Method, version: string) => Effect.Effect<void, Error>
+-  readonly removal: (
+-    method: Method,
+-  ) => { readonly command: ReadonlyArray<string>; readonly run: Effect.Effect<void, Error> } | undefined
+-}
+-
+-export class Service extends Context.Service<Service, Interface>()("@opencode/cli/Updater") {}
+-
+-export function decodePolicy(text: string): Policy | undefined {
+-  // The CLI only projects this host-level preference instead of initializing
+-  // the location-scoped server configuration graph.
+-  const errors: ParseError[] = []
+-  const input: unknown = parse(text, errors, { allowTrailingComma: true })
+-  if (errors.length || typeof input !== "object" || input === null) return
+-  if ("update" in input) {
+-    const value = input.update
+-    if (value === "disable" || value === "notify" || value === "auto") return value
+-    return
+-  }
+-  if (!("autoupdate" in input)) return
+-  if (input.autoupdate === false) return "disable"
+-  if (input.autoupdate === "notify") return "notify"
+-  if (input.autoupdate === true) return "auto"
+-}
+-
+-const make = Effect.gen(function* () {
+-  const fs = yield* FileSystem.FileSystem
+-  const global = yield* Global.Service
+-  const appProcess = yield* AppProcess.Service
+-  const flock = yield* EffectFlock.Service
+-  const installedVersion = yield* Ref.make(OPENCODE_VERSION)
+-  const channel = OPENCODE_CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")
+-  const executable = yield* fs.realPath(process.execPath).pipe(Effect.orElseSucceed(() => process.execPath))
+-  const installedPackage = yield* Effect.gen(function* () {
+-    const directory = path.dirname(path.dirname(executable))
+-    const manifest: { name: string; bin?: Record<string, string> } = yield* fs
+-      .readFileString(path.join(directory, "package.json"))
+-      .pipe(Effect.flatMap((text) => Effect.try(() => JSON.parse(text))))
+-    // Source invocations run inside Bun or Node, which may themselves be npm packages.
+-    if (!/^@opencode(?:-ai)?\/cli(?:-node)?$/.test(manifest.name)) return
+-    if (Object.values(manifest.bin ?? {}).some((bin) => path.resolve(directory, bin) === executable))
+-      return manifest.name
+-  }).pipe(Effect.orElseSucceed(() => undefined))
+-  // "opencode" is Homebrew Core's formula; the others are published to anomalyco/tap.
+-  const installedFormula = ["opencode", "opencode-beta", "opencode-v2"].find((name) =>
+-    executable.includes(`${path.sep}Cellar${path.sep}${name}${path.sep}`),
+-  )
+-  // WinGet extracts portable packages into a directory named after the package identifier.
+-  const installedWinget = /[\\/]winget[\\/]packages[\\/]anomaly\.opencode_/i.test(executable)
+-
+-  const readPolicy = Effect.fnUntraced(function* () {
+-    const values = yield* Effect.forEach(["config.json", "opencode.json", "opencode.jsonc"], (name) =>
+-      fs.readFileString(path.join(global.config, name)).pipe(
+-        Effect.map(decodePolicy),
+-        Effect.orElseSucceed(() => undefined),
+-      ),
+-    )
+-    return values.findLast((value) => value !== undefined) ?? "notify"
+-  })
+-
+-  const exec = Effect.fnUntraced(function* (command: string[], timeout: Duration.Input = "30 seconds") {
+-    return yield* appProcess
+-      .run(ChildProcess.make(command[0], command.slice(1)), {
+-        timeout,
+-        maxOutputBytes: 100_000,
+-        maxErrorBytes: 100_000,
+-      })
+-      .pipe(
+-        Effect.map((result) => ({
+-          code: result.exitCode,
+-          stdout: result.stdout.toString("utf8"),
+-          stderr: result.stderr.toString("utf8"),
+-        })),
+-      )
+-  })
+-
+-  const curlPath = path.resolve(
+-    global.home,
+-    ".opencode",
+-    "bin",
+-    process.platform === "win32" ? "opencode.exe" : "opencode",
+-  )
+-  const curlBinary = yield* fs.realPath(curlPath).pipe(Effect.orElseSucceed(() => curlPath))
+-
+-  // On Windows a bare `bash` may be the WSL launcher, which cannot run the installer against Windows paths.
+-  const installerBash = Effect.fnUntraced(function* () {
+-    if (process.platform !== "win32") return "bash"
+-    if (process.env.OPENCODE_GIT_BASH_PATH) return process.env.OPENCODE_GIT_BASH_PATH
+-    const git = yield* exec(["git", "--exec-path"]).pipe(Effect.orElseSucceed(() => undefined))
+-    const bash = git?.code === 0 ? path.resolve(git.stdout.trim(), "..", "..", "..", "bin", "bash.exe") : undefined
+-    if (bash && (yield* fs.exists(bash).pipe(Effect.orElseSucceed(() => false)))) return bash
+-    return yield* Effect.fail(
+-      new UpgradeError({
+-        title: "Git Bash is required to update OpenCode",
+-        detail: "The OpenCode installer runs with Git Bash on Windows, and it was not found.",
+-        retry: "Install Git for Windows or set OPENCODE_GIT_BASH_PATH, then run opencode upgrade again.",
+-      }),
+-    )
+-  })
+-
+-  const method = Effect.fnUntraced(function* () {
+-    if (executable === curlBinary) return "curl"
+-    if (installedFormula) return "brew"
+-    if (installedWinget) return "winget"
+-    if (!installedPackage) return
+-
+-    const parts = executable.toLowerCase().split(path.sep).map((part) => part.replace(/^\./, ""))
+-    const checks: Array<{ method: Method; command: string[] }> = [
+-      { method: "npm", command: ["npm", "list", "-g", "--depth=0", installedPackage] },
+-      { method: "pnpm", command: ["pnpm", "list", "-g", "--depth=0", installedPackage] },
+-      { method: "bun", command: ["bun", "pm", "ls", "-g"] },
+-      { method: "yarn", command: ["yarn", "global", "list"] },
+-      { method: "vp", command: ["vp", "list", "-g", "--json", installedPackage] },
+-    ]
+-    checks.sort((a, b) => Number(parts.includes(b.method)) - Number(parts.includes(a.method)))
+-    const results = yield* Effect.forEach(
+-      checks,
+-      (check) =>
+-        exec(check.command).pipe(
+-          Effect.orElseSucceed(() => ({ code: 1, stdout: "", stderr: "" })),
+-          Effect.map((result) => ({ check, result })),
+-        ),
+-      { concurrency: "unbounded" },
+-    )
+-    return results.find((result) => {
+-      if (result.check.method !== "vp") return result.result.stdout.includes(installedPackage)
+-      // Vite+ repeats the filter in its successful no-match message, so substring detection would be a false positive.
+-      return Option.exists(decodeVpPackages(result.result.stdout), (packages) =>
+-        packages.some((item) => item.name === installedPackage),
+-      )
+-    })?.check.method
+-  })
+-
+-  const removalCommand = (method: Method) => {
+-    if (method === "winget") return ["winget", "uninstall", ...wingetArgs]
+-    if (method === "curl" || method === "brew" || !installedPackage) return undefined
+-    const commands = {
+-      npm: ["npm", "uninstall", "--global", installedPackage],
+-      pnpm: ["pnpm", "remove", "--global", installedPackage],
+-      bun: ["bun", "remove", "--global", installedPackage],
+-      yarn: ["yarn", "global", "remove", installedPackage],
+-      vp: ["vp", "uninstall", "-g", installedPackage],
+-    }
+-    return commands[method]
+-  }
+-
+-  const removal = (method: Method) => {
+-    const command = removalCommand(method)
+-    if (!command) return undefined
+-    return {
+-      command,
+-      run: retaining(
+-        method,
+-        exec(command, "5 minutes").pipe(
+-          Effect.flatMap((result) => (result.code === 0 ? Effect.void : Effect.fail(new Error(resultDetail(result))))),
+-        ),
+-        global.tmp,
+-      ),
+-    }
+-  }
+-
+-  const release = Effect.fnUntraced(function* (method?: Method) {
+-    const distribution = method === "brew" ? "homebrew" : "npm"
+-    // Homebrew Core builds its formula on its own schedule, so the tap release does not describe it.
+-    const core = method === "brew" && installedFormula === "opencode"
+-    const response = yield* Effect.tryPromise({
+-      try: (signal) =>
+-        fetch(
+-          core
+-            ? "https://formulae.brew.sh/api/formula/opencode.json"
+-            : `https://opencode.ai/update/api/${encodeURIComponent(channel)}/${encodeURIComponent(OPENCODE_ARTIFACT)}/${distribution}?current=${encodeURIComponent(OPENCODE_VERSION)}`,
+-          {
+-            signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+-          },
+-        ),
+-      catch: (cause) =>
+-        new UpgradeError(
+-          {
+-            title: "Could not check for OpenCode updates",
+-            detail: errorDetail(cause),
+-            retry: "Check your network, then run opencode upgrade again.",
+-          },
+-          { cause },
+-        ),
+-    })
+-    if (!response.ok)
+-      return yield* Effect.fail(
+-        new UpgradeError({
+-          title: "Could not check for OpenCode updates",
+-          detail: `The update service returned HTTP ${response.status}.`,
+-          retry: "Try again in a few minutes.",
+-        }),
+-      )
+-    const data: { version?: string; metadata?: { package?: string }; versions?: { stable?: string } } =
+-      yield* Effect.tryPromise({
+-        try: () => response.json(),
+-        catch: (cause) =>
+-          new UpgradeError(
+-            {
+-              title: "Could not read the OpenCode update information",
+-              detail: errorDetail(cause),
+-              retry: "Try again in a few minutes.",
+-            },
+-            { cause },
+-          ),
+-      })
+-    const version = core ? data.versions?.stable : data.version
+-    const packageName = core ? "opencode" : data.metadata?.package
+-    if (!version || !packageName)
+-      return yield* Effect.fail(
+-        new UpgradeError({
+-          title: "Could not read the OpenCode update information",
+-          detail: "The update service returned incomplete release information.",
+-          retry: "Try again in a few minutes.",
+-        }),
+-      )
+-    return { package: packageName, version }
+-  })
+-
+-  // WinGet moderates every submission, so only its own index knows which release it can install.
+-  const wingetVersion = Effect.fnUntraced(function* () {
+-    const failure = (detail: string, cause?: unknown) =>
+-      new UpgradeError(
+-        {
+-          title: "Could not check for OpenCode updates",
+-          detail,
+-          command: ["winget", "search", ...wingetArgs].join(" "),
+-          retry: "Fix the issue above, then run opencode upgrade again.",
+-        },
+-        cause === undefined ? undefined : { cause },
+-      )
+-    const result = yield* exec(["winget", "search", ...wingetArgs], "1 minute").pipe(
+-      Effect.mapError((cause) => failure(errorDetail(cause), cause)),
+-    )
+-    // Column headers are localized, but the result row always lists the identifier followed by the version.
+-    const version = result.stdout
+-      .split(/\r?\n|\r/)
+-      .map((line) => line.trim().split(/\s+/))
+-      .flatMap((tokens) => {
+-        const index = tokens.findIndex((token) => token.toLowerCase() === wingetPackage.toLowerCase())
+-        return index === -1 ? [] : tokens.slice(index + 1, index + 2)
+-      })
+-      .find((token) => parseReleaseVersion(token))
+-    if (result.code !== 0 || !version) return yield* Effect.fail(failure(resultDetail(result)))
+-    return version
+-  })
+-
+-  const latest = (selected?: Method) =>
+-    (selected ? Effect.succeed(selected) : method()).pipe(
+-      Effect.flatMap((method) =>
+-        method === "winget" ? wingetVersion() : release(method).pipe(Effect.map((data) => data.version)),
+-      ),
+-    )
+-
+-  const temporaryDirectory = (prefix: string) =>
+-    Effect.acquireRelease(fs.makeTempDirectory({ directory: global.cache, prefix }), (directory) =>
+-      fs.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
+-    )
+-
+-  // On Windows the installer must delete or replace the running binary, which only works
+-  // while another link to it exists (see RetainedImage). Upgrades keep that link in the
+-  // cache; uninstall has already removed the cache, so it uses the temporary directory.
+-  const retaining = <A, E, R>(method: Method, effect: Effect.Effect<A, E, R>, directory = global.cache) => {
+-    if (process.platform !== "win32" || method === "brew") return effect
+-    // Only the installed binary is at stake; source checkouts run inside bun or node.
+-    const owned =
+-      method === "curl"
+-        ? executable === curlBinary
+-        : method === "winget"
+-          ? installedWinget
+-          : installedPackage !== undefined
+-    if (!owned) return effect
+-    return Effect.scoped(RetainedImage.retain(directory, "upgrade").pipe(Effect.andThen(effect))).pipe(
+-      Effect.provideService(FileSystem.FileSystem, fs),
+-    )
+-  }
+-
+-  const runUpgrade = (input: {
+-    readonly method: Method
+-    readonly command: string[]
+-    readonly displayCommand?: string[]
+-    readonly title?: string
+-    readonly retry?: string
+-  }) => {
+-    const failure = (detail: string, cause?: unknown) =>
+-      new UpgradeError(
+-        {
+-          title: input.title ?? `${installNames[input.method]} could not install OpenCode`,
+-          detail,
+-          command: (input.displayCommand ?? input.command).join(" "),
+-          retry: input.retry ?? "Fix the issue above, then run opencode upgrade again.",
+-        },
+-        cause === undefined ? undefined : { cause },
+-      )
+-    return exec(input.command, "5 minutes").pipe(
+-      Effect.flatMap((result) =>
+-        result.code === 0 ? Effect.succeed(result) : Effect.fail(failure(resultDetail(result))),
+-      ),
+-      Effect.mapError((cause) =>
+-        cause instanceof UpgradeError
+-          ? cause
+-          : failure(
+-              cause instanceof AppProcess.AppProcessError && cause.stderr === undefined && cause.cause === undefined
+-                ? `Failed to update with ${input.method}`
+-                : errorDetail(cause),
+-              cause,
+-            ),
+-      ),
+-    )
+-  }
+-
+-  const upgrade = Effect.fnUntraced(function* (method: Method, input: string) {
+-    if (!parseReleaseVersion(input)) return yield* Effect.fail(new Error(`Invalid version: ${input}`))
+-    const version = input.trim().replace(/^v/, "")
+-    const packageName =
+-      method === "winget"
+-        ? wingetPackage
+-        : method === "brew" && installedFormula === "opencode"
+-          ? "opencode"
+-          : (yield* release(method)).package
+-    const target = `${packageName}@${version}`
+-    if (installedPackage && packageName !== installedPackage && (method === "pnpm" || method === "yarn")) {
+-      return yield* Effect.fail(new Error(`Reinstall ${target} with ${method} to migrate from ${installedPackage}.`))
+-    }
+-    const commands: Record<Exclude<Method, "bun" | "curl" | "brew" | "winget">, string[]> = {
+-      // Keep the old package: uninstalling it can unlink the replacement command.
+-      npm: [
+-        "npm",
+-        "install",
+-        "--global",
+-        `--allow-scripts=${packageName}`,
+-        ...((OPENCODE_ARTIFACT === "cli" && !installedPackage?.endsWith("/cli-node")) ||
+-        (installedPackage && packageName !== installedPackage)
+-          ? ["--force"]
+-          : []),
+-        target,
+-      ],
+-      pnpm: ["pnpm", "add", "--global", `--allow-build=${packageName}`, target],
+-      yarn: ["yarn", "global", "add", target],
+-      vp:
+-        installedPackage && packageName !== installedPackage
+-          ? ["vp", "install", "-g", "--force", target]
+-          : ["vp", "update", "-g", target],
+-    }
+-    yield* Effect.scoped(
+-      Effect.gen(function* () {
+-        // Other OpenCode processes may be installing at the same time. Wait longer than the
+-        // slowest install (curl runs two 5-minute commands).
+-        yield* flock.acquire("cli-upgrade", undefined, { timeoutMs: Duration.toMillis("15 minutes") })
+-        if (method === "bun") {
+-          // Bun does not prune old versions from its shared package cache.
+-          yield* fs.makeDirectory(global.cache, { recursive: true })
+-          const cache = yield* temporaryDirectory("update-")
+-          return yield* retaining(
+-            method,
+-            runUpgrade({
+-              method,
+-              command: ["bun", "install", "--global", "--trust", "--cache-dir", cache, target],
+-              displayCommand: ["bun", "install", "--global", "--trust", target],
+-            }),
+-          )
+-        }
+-        if (method === "curl") {
+-          const bash = yield* installerBash()
+-          yield* fs.makeDirectory(global.cache, { recursive: true })
+-          const directory = yield* temporaryDirectory("update-")
+-          const installer = path.join(directory, "install")
+-          yield* runUpgrade({
+-            method,
+-            command: ["curl", "-fsSL", "-o", installer, "https://opencode.ai/v2/install"],
+-            displayCommand: ["curl", "-fsSL", "https://opencode.ai/v2/install"],
+-            title: "Could not download the OpenCode installer",
+-            retry: "Check your network, then run opencode upgrade again.",
+-          })
+-          return yield* retaining(
+-            method,
+-            runUpgrade({
+-              method,
+-              command: [bash, installer, "--version", version, "--no-modify-path"],
+-              displayCommand: ["opencode", "upgrade", version, "--method", "curl"],
+-              title: "The OpenCode installer failed",
+-            }),
+-          )
+-        }
+-        if (method === "brew") return yield* runUpgrade({ method, command: ["brew", "upgrade", packageName] })
+-        if (method === "winget")
+-          return yield* retaining(
+-            method,
+-            runUpgrade({
+-              method,
+-              command: [
+-                "winget",
+-                "upgrade",
+-                ...wingetArgs,
+-                "--version",
+-                version,
+-                "--silent",
+-                "--accept-package-agreements",
+-              ],
+-            }),
+-          )
+-        return yield* retaining(method, runUpgrade({ method, command: commands[method] }))
+-      }),
+-    ).pipe(
+-      Effect.mapError((cause) =>
+-        cause instanceof UpgradeError
+-          ? cause
+-          : new UpgradeError(
+-              {
+-                title: "Could not prepare the OpenCode upgrade",
+-                detail: errorDetail(cause),
+-                retry: "Fix the issue above, then run opencode upgrade again.",
+-              },
+-              { cause },
+-            ),
+-      ),
+-      Effect.asVoid,
+-    )
+-  })
+-
+-  const inspect = Effect.fnUntraced(function* () {
+-    if (OPENCODE_LOCAL || ["1", "true"].includes(process.env.OPENCODE_DISABLE_AUTOUPDATE?.toLowerCase() ?? "")) {
+-      yield* Effect.logInfo("update check skipped", {
+-        reason: OPENCODE_LOCAL ? "local-install" : "disabled",
+-        version: OPENCODE_VERSION,
+-        channel: OPENCODE_CHANNEL,
+-      })
+-      return undefined
+-    }
+-    const policy = yield* readPolicy()
+-    if (policy === "disable") {
+-      yield* Effect.logInfo("update check skipped", { reason: "policy-disabled" })
+-      return undefined
+-    }
+-
+-    const current = yield* Ref.get(installedVersion)
+-    const version = yield* latest()
+-    yield* Effect.logInfo("update check", {
+-      current,
+-      latest: version,
+-    })
+-    const next = action(current, version, policy)
+-    if (next === "none") {
+-      yield* Effect.logInfo("update check done", { action: "up-to-date" })
+-      return undefined
+-    }
+-    yield* Effect.logInfo("OpenCode update available", { current, latest: version, action: next })
+-    return { policy, version }
+-  })
+-
+-  const install = Effect.fnUntraced(function* (version: string) {
+-    const detected = yield* method()
+-    if (!detected) {
+-      yield* Effect.logWarning("update skipped: installation method not found")
+-      return false
+-    }
+-    const current = yield* Ref.get(installedVersion)
+-    yield* upgrade(detected, version)
+-    yield* Ref.set(installedVersion, version)
+-    yield* Effect.logInfo("updated OpenCode", { from: current, to: version, method: detected })
+-    return true
+-  })
+-
+-  const apply = Effect.fn("cli.updater.apply")(function* (version: string) {
+-    if (!(yield* install(version)))
+-      return yield* Effect.fail(
+-        new Error(
+-          "Could not detect the installation method. Update with your package manager or download the latest release.",
+-        ),
+-      )
+-  })
+-
+-  const check = Effect.fn("cli.updater.check")(function* () {
+-    if (OPENCODE_LOCAL)
+-      return {
+-        type: "unavailable" as const,
+-        message: "This build runs from a source checkout. Use an installed OpenCode release to check for updates.",
+-      }
+-    const detected = yield* method()
+-    if (!detected)
+-      return {
+-        type: "unavailable" as const,
+-        message:
+-          "Could not detect the installation method. Update with your package manager or download the latest release.",
+-      }
+-    const version = yield* latest(detected)
+-    if (!parseReleaseVersion(version)) return yield* Effect.fail(new Error(`Invalid version: ${version}`))
+-    const current = yield* Ref.get(installedVersion)
+-    if (action(current, version, "auto") === "none") {
+-      // An earlier check may have installed the update while this client is still running.
+-      return action(OPENCODE_VERSION, current, "auto") === "none"
+-        ? undefined
+-        : { type: "installed" as const, version: current }
+-    }
+-    return { type: "available" as const, version }
+-  })
+-
+-  const run = Effect.fn("cli.updater.run")(
+-    function* (onInstall: (version: string) => void = () => {}) {
+-      const result = yield* inspect()
+-      if (!result) return undefined
+-      if (result.policy === "notify") return { type: "available" as const, version: result.version }
+-      onInstall(result.version)
+-      if (!(yield* install(result.version))) return yield* Effect.fail(new Error("Installation method not found"))
+-      return { type: "installed" as const, version: result.version }
+-    },
+-    Effect.catch((error) => Effect.logWarning("update check failed", { error }).pipe(Effect.as(undefined))),
+-  )
+-
+-  return Service.of({ run, check, apply, method, latest, upgrade, removal })
+-})
+-
+-export const layer = Layer.effect(Service, make)
+-
+-export * as Updater from "./updater"
+-export { action, type Action, type Policy } from "./updater-action"
+diff --git a/packages/cli/test/fixture/upgrade.ts b/packages/cli/test/fixture/upgrade.ts
+deleted file mode 100644
+index 149433d..0000000
+--- a/packages/cli/test/fixture/upgrade.ts
++++ /dev/null
+@@ -1,39 +0,0 @@
+-import { NodeServices } from "@effect/platform-node"
+-import { Effect } from "effect"
+-import { Command } from "effect/cli"
+-import { Commands } from "../../src/commands/commands"
+-import upgrade from "../../src/commands/handlers/upgrade"
+-import { Updater } from "../../src/services/updater"
+-
+-const record = (event: unknown) => console.log(`EVENT ${JSON.stringify(event)}`)
+-
+-await Effect.runPromise(
+-  Command.runWith(Commands.commands.upgrade.spec.pipe(Command.withHandler(upgrade)), { version: "test" })(
+-    process.argv.slice(2),
+-  ).pipe(
+-    Effect.provideService(Updater.Service, {
+-      run: () => Effect.die("Manual upgrades must not check for automatic updates"),
+-      check: () => Effect.die("Manual upgrades must not check for TUI updates"),
+-      apply: () => Effect.die("Manual upgrades must not apply TUI updates"),
+-      removal: () => undefined,
+-      method: () =>
+-        Effect.sync(() => {
+-          record("method")
+-          return Updater.methods.find((method) => method === (process.env.UPGRADE_TEST_METHOD ?? "npm"))
+-        }),
+-      latest: (method) =>
+-        Effect.suspend(() => {
+-          record({ latest: method })
+-          return process.env.UPGRADE_TEST_LATEST_ERROR
+-            ? Effect.fail(new Error("Update check failed"))
+-            : Effect.succeed("0.0.0-beta-new")
+-        }),
+-      upgrade: (method, version) =>
+-        Effect.suspend(() => {
+-          record({ method, version })
+-          return process.env.UPGRADE_TEST_INSTALL_ERROR ? Effect.fail(new Error("Permission denied")) : Effect.void
+-        }),
+-    }),
+-    Effect.provide(NodeServices.layer),
+-  ),
+-)
+diff --git a/packages/cli/test/retained-image.test.ts b/packages/cli/test/retained-image.test.ts
+index e6e8f65..065dffc 100644
+--- a/packages/cli/test/retained-image.test.ts
++++ b/packages/cli/test/retained-image.test.ts
+@@ -16,15 +16,15 @@ windows("retain hard-links the running image for the scope and sweeps only links
+     const directory = yield* fs.makeTempDirectoryScoped({ prefix: "opencode-retained-" })
+     // pid 999999999 does not exist; pid 4 is System, alive but not openable (EPERM).
+     const kept = ["opencode-service-4-aa.exe", `opencode-service-${process.pid}-bb.exe`, "unrelated.exe"]
+-    yield* Effect.forEach([...kept, "opencode-upgrade-999999999-cc.exe"], (name) =>
++    yield* Effect.forEach([...kept, "opencode-removal-999999999-cc.exe"], (name) =>
+       fs.writeFileString(path.join(directory, name), name),
+     )
+     const image = statSync(realpathSync(process.execPath))
+     yield* Effect.scoped(
+       Effect.gen(function* () {
+-        const link = yield* RetainedImage.retain(directory, "upgrade")
++        const link = yield* RetainedImage.retain(directory, "removal")
+         if (!link) return yield* Effect.die("Expected a link")
+-        expect(path.basename(link)).toMatch(new RegExp(`^opencode-upgrade-${process.pid}-[0-9a-f]{8}\\.exe$`))
++        expect(path.basename(link)).toMatch(new RegExp(`^opencode-removal-${process.pid}-[0-9a-f]{8}\\.exe$`))
+         expect(statSync(link).ino).toBe(image.ino)
+         expect(statSync(link).nlink).toBe(image.nlink + 1)
+         expect((yield* fs.readDirectory(directory)).sort()).toEqual([...kept, path.basename(link)].sort())
+@@ -52,11 +52,11 @@ windows("relocate moves only retained links out of a directory", () =>
+     const cache = path.join(root, "cache")
+     const tmp = path.join(root, "tmp")
+     yield* fs.makeDirectory(cache)
+-    yield* fs.writeFileString(path.join(cache, "opencode-upgrade-1-ab.exe"), "link")
++    yield* fs.writeFileString(path.join(cache, "opencode-removal-1-ab.exe"), "link")
+     yield* fs.writeFileString(path.join(cache, "models.json"), "{}")
+     yield* RetainedImage.relocate(cache, tmp)
+     expect(yield* fs.readDirectory(cache)).toEqual(["models.json"])
+-    expect(yield* fs.readDirectory(tmp)).toEqual(["opencode-upgrade-1-ab.exe"])
++    expect(yield* fs.readDirectory(tmp)).toEqual(["opencode-removal-1-ab.exe"])
+   }),
+ )
+ 
+diff --git a/packages/cli/test/updater-install.test.ts b/packages/cli/test/updater-install.test.ts
+deleted file mode 100644
+index 2896846..0000000
+--- a/packages/cli/test/updater-install.test.ts
++++ /dev/null
+@@ -1,606 +0,0 @@
+-import { NodeServices } from "@effect/platform-node"
+-import { EffectFlock } from "@opencode/util/effect-flock"
+-import { LayerNode } from "@opencode/util/effect/layer-node"
+-import { Global } from "@opencode/util/global"
+-import { AppProcess } from "@opencode/util/process"
+-import { expect, spyOn, test } from "bun:test"
+-import { Effect, FileSystem, Layer, PlatformError, Stream } from "effect"
+-import { ChildProcessSpawner } from "effect/process"
+-import { existsSync, readdirSync, readFileSync } from "node:fs"
+-import path from "node:path"
+-import { Updater } from "../src/services/updater"
+-import { testEffect } from "../../core/test/lib/effect"
+-
+-const it = testEffect(NodeServices.layer)
+-
+-declare const OPENCODE_CLI_NAME: string | undefined
+-
+-function fixture(
+-  respond: (command: {
+-    readonly command: string
+-    readonly args: ReadonlyArray<string>
+-  }) => Partial<AppProcess.RunResult> & {
+-    error?: AppProcess.AppProcessError
+-  } = () => ({}),
+-  name = "@opencode/cli",
+-  failCleanup = false,
+-  releasePackage = name,
+-  formula?: string,
+-  executableOverride?: (root: string, home: string) => Effect.Effect<string, PlatformError.PlatformError, FileSystem.FileSystem>,
+-) {
+-  return Effect.gen(function* () {
+-    const fs = yield* FileSystem.FileSystem
+-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "opencode-updater-" })
+-    const execPath = process.execPath
+-    const modules = path.join(root, "node_modules")
+-    const executable = executableOverride
+-      ? yield* executableOverride(root, path.join(root, "home"))
+-      : formula
+-        ? path.join(root, "Cellar", formula, "2.0.20", "bin", "opencode")
+-        : path.join(modules, "@opencode", "cli", "bin", "opencode")
+-    yield* fs.makeDirectory(path.dirname(executable), { recursive: true })
+-    yield* fs.writeFileString(executable, "binary")
+-    if (!formula && !executableOverride)
+-      yield* fs.writeFileString(
+-        path.join(modules, "@opencode", "cli", "package.json"),
+-        JSON.stringify({ name, bin: { opencode: "bin/opencode" } }),
+-      )
+-    const requests: string[] = []
+-    // The updater uses global fetch; scope this replacement to each install test.
+-    yield* Effect.acquireRelease(
+-      Effect.sync(() =>
+-        spyOn(globalThis, "fetch").mockImplementation(
+-          Object.assign(
+-            async (input: string | URL | Request) => {
+-              const url = input instanceof Request ? input.url : input.toString()
+-              requests.push(url)
+-              if (new URL(url).hostname === "formulae.brew.sh") return Response.json({ versions: { stable: "2.0.21" } })
+-              return Response.json({ version: "2.3.4", metadata: { package: releasePackage } })
+-            },
+-            { preconnect: fetch.preconnect },
+-          ),
+-        ),
+-      ),
+-      (request) => Effect.sync(() => request.mockRestore()),
+-    )
+-    const global = Global.make({
+-      home: path.join(root, "home"),
+-      data: path.join(root, "data"),
+-      cache: path.join(root, "cache"),
+-      config: path.join(root, "config"),
+-      state: path.join(root, "state"),
+-      tmp: path.join(root, "tmp"),
+-      bin: path.join(root, "bin"),
+-      log: path.join(root, "log"),
+-      repos: path.join(root, "repos"),
+-    })
+-    // Windows locates the installer's Git Bash through `git --exec-path`; answer it with a fixture install.
+-    const git = path.join(root, "Git")
+-    const bash = process.platform === "win32" ? path.join(git, "bin", "bash.exe") : "bash"
+-    if (process.platform === "win32") {
+-      yield* fs.makeDirectory(path.dirname(bash), { recursive: true })
+-      yield* fs.writeFileString(bash, "bash")
+-    }
+-    const commands: string[][] = []
+-    const updater = yield* Updater.Service.pipe(
+-      Effect.provide(Updater.layer),
+-      Effect.provide(
+-        LayerNode.compile(EffectFlock.node, {
+-          replacements: [Global.node.replace(Layer.succeed(Global.Service, global))],
+-        }),
+-      ),
+-      Effect.provideService(Global.Service, global),
+-      Effect.provideService(FileSystem.FileSystem, {
+-        ...fs,
+-        remove: (target, options) =>
+-          failCleanup && target.startsWith(global.cache)
+-            ? Effect.fail(
+-                PlatformError.systemError({
+-                  _tag: "PermissionDenied",
+-                  module: "FileSystem",
+-                  method: "remove",
+-                  pathOrDescriptor: target,
+-                }),
+-              )
+-            : fs.remove(target, options),
+-        realPath: (input) => (input === execPath ? fs.realPath(executable) : fs.realPath(input)),
+-      }),
+-      Effect.provideService(
+-        AppProcess.Service,
+-        AppProcess.Service.of({
+-          ...spawner,
+-          run: (command) =>
+-            Effect.suspend(() => {
+-              if (command._tag !== "StandardCommand") return Effect.die("Unexpected piped install command")
+-              const args = command.args.map(String)
+-              const lookup = command.command === "git" && args[0] === "--exec-path"
+-              if (!lookup) commands.push([command.command, ...args])
+-              const result = lookup
+-                ? { stdout: Buffer.from(`${path.join(git, "mingw64", "libexec", "git-core")}\n`) }
+-                : respond({ command: command.command, args })
+-              if (result.error) return Effect.fail(result.error)
+-              return Effect.succeed({
+-                command: command.command,
+-                exitCode: 0,
+-                stdout: Buffer.alloc(0),
+-                stderr: Buffer.alloc(0),
+-                stdoutTruncated: false,
+-                stderrTruncated: false,
+-                ...result,
+-              })
+-            }),
+-          runStream: () => Stream.die("Unexpected streaming install command"),
+-        }),
+-      ),
+-    )
+-    return { updater, commands, requests, global, fs, executable, bash }
+-  })
+-}
+-
+-const windows = process.platform === "win32" ? it.live : it.live.skip
+-const unix = process.platform === "win32" ? it.live.skip : it.live
+-
+-const installs = [
+-  {
+-    method: "npm",
+-    command: ["npm", "install", "--global", "--allow-scripts=@opencode/cli", "--force", "@opencode/cli@2.3.4-beta.1"],
+-  },
+-  {
+-    method: "pnpm",
+-    command: ["pnpm", "add", "--global", "--allow-build=@opencode/cli", "@opencode/cli@2.3.4-beta.1"],
+-  },
+-  { method: "yarn", command: ["yarn", "global", "add", "@opencode/cli@2.3.4-beta.1"] },
+-  { method: "vp", command: ["vp", "update", "-g", "@opencode/cli@2.3.4-beta.1"] },
+-] as const
+-
+-installs.forEach(({ method, command }) => {
+-  it.live(`${method} installs the explicit V2 package version without a leading v`, () =>
+-    Effect.gen(function* () {
+-      const test = yield* fixture()
+-      yield* test.updater.upgrade(method, "v2.3.4-beta.1")
+-      expect(test.commands).toEqual([[...command]])
+-    }),
+-  )
+-})
+-
+-it.live("vp force-installs a renamed V2 package that replaces the existing binary owner", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture(() => ({}), "@opencode/cli", false, "@opencode/cli-node")
+-    yield* test.updater.upgrade("vp", "v2.3.4-beta.1")
+-    expect(test.commands).toEqual([["vp", "install", "-g", "--force", "@opencode/cli-node@2.3.4-beta.1"]])
+-  }),
+-)
+-
+-it.live("vp removes the package from its managed global store", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture()
+-    const removal = test.updater.removal("vp")
+-    if (!removal) return yield* Effect.die("Expected vp removal command")
+-    expect(removal.command).toEqual(["vp", "uninstall", "-g", "@opencode/cli"])
+-    yield* removal.run
+-    expect(test.commands).toEqual([["vp", "uninstall", "-g", "@opencode/cli"]])
+-  }),
+-)
+-;[0, 1].forEach((exitCode) => {
+-  it.live(`bun isolates and removes its install cache after exit ${exitCode}`, () =>
+-    Effect.gen(function* () {
+-      const test = yield* fixture((command) => {
+-        expect(command.command).toBe("bun")
+-        expect(existsSync(command.args[4])).toBe(true)
+-        return { exitCode, stderr: Buffer.from("bun install failed") }
+-      })
+-      const result = yield* test.updater.upgrade("bun", "v2.3.4-beta.1").pipe(Effect.flip, Effect.option)
+-      const cache = test.commands[0]?.[5]
+-      expect(cache).toStartWith(path.join(test.global.cache, "update-"))
+-      expect(test.commands).toEqual([
+-        ["bun", "install", "--global", "--trust", "--cache-dir", cache, "@opencode/cli@2.3.4-beta.1"],
+-      ])
+-      expect(yield* test.fs.readDirectory(test.global.cache)).toEqual([])
+-      expect(result._tag).toBe(exitCode === 0 ? "None" : "Some")
+-      if (result._tag === "Some") expect(result.value.message).toBe("bun install failed")
+-    }),
+-  )
+-})
+-
+-it.live("bun ignores install cache cleanup failures", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture(() => ({}), "@opencode/cli", true)
+-    yield* test.updater.upgrade("bun", "v2.3.4-beta.1")
+-    expect(test.commands).toHaveLength(1)
+-  }),
+-)
+-;["success", "download", "install"].forEach((failure) => {
+-  it.live(`curl uses the V2 installer and cleans its directory: ${failure}`, () =>
+-    Effect.gen(function* () {
+-      const test = yield* fixture((command) => {
+-        const installer = command.command === "curl" ? command.args[2] : command.args[0]
+-        expect(existsSync(path.dirname(installer))).toBe(true)
+-        return {
+-          exitCode:
+-            path.basename(command.command, ".exe") ===
+-            (failure === "download" ? "curl" : failure === "install" ? "bash" : "")
+-              ? 1
+-              : 0,
+-          stderr: Buffer.from(`${failure} failed`),
+-        }
+-      })
+-      const result = yield* test.updater.upgrade("curl", "v2.3.4-beta.1").pipe(Effect.flip, Effect.option)
+-      const installer = test.commands[0]?.[3]
+-      expect(installer).toStartWith(path.join(test.global.cache, "update-"))
+-      expect(test.commands).toEqual([
+-        ["curl", "-fsSL", "-o", installer, "https://opencode.ai/v2/install"],
+-        ...(failure === "download" ? [] : [[test.bash, installer, "--version", "2.3.4-beta.1", "--no-modify-path"]]),
+-      ])
+-      expect(yield* test.fs.readDirectory(test.global.cache)).toEqual([])
+-      expect(result._tag).toBe(failure === "success" ? "None" : "Some")
+-      if (result._tag === "Some") expect(result.value.message).toBe(`${failure} failed`)
+-    }),
+-  )
+-})
+-
+-it.live("invalid version targets never execute a command or create a cache", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture()
+-    yield* Effect.forEach(Updater.methods, (method) =>
+-      Effect.forEach(
+-        ["", "latest", "2.3", "01.2.3", "vv2.3.4", "2.3.4; echo unsafe", "--global", "v2.3.4\n--force"],
+-        (version) =>
+-          Effect.gen(function* () {
+-            const error = yield* test.updater.upgrade(method, version).pipe(Effect.flip)
+-            expect(error.message).toBe(`Invalid version: ${version}`)
+-          }),
+-      ),
+-    )
+-    expect(test.commands).toEqual([])
+-    expect(yield* test.fs.exists(test.global.cache)).toBe(false)
+-  }),
+-)
+-
+-it.live("install failures expose stderr and process errors do not report success", () =>
+-  Effect.gen(function* () {
+-    const failed = yield* fixture(() => ({ exitCode: 1, stderr: Buffer.from("  registry denied access\n") }))
+-    const error = yield* failed.updater.upgrade("npm", "2.3.4").pipe(Effect.flip)
+-    expect(error.message).toBe("registry denied access")
+-    const missing = yield* fixture(() => ({ error: new AppProcess.AppProcessError({ command: "npm" }) }))
+-    const unavailable = yield* missing.updater.upgrade("npm", "2.3.4").pipe(Effect.flip)
+-    expect(unavailable.message).toBe("Failed to update with npm")
+-    expect(failed.commands).toHaveLength(1)
+-    expect(missing.commands).toHaveLength(1)
+-  }),
+-)
+-;(["npm", "pnpm", "bun", "yarn", "vp", undefined] as const).forEach((method) => {
+-  it.live(`method detection identifies ${method ?? "an unknown installation"} using the V2 package`, () =>
+-    Effect.gen(function* () {
+-      const test = yield* fixture((command) => ({
+-        stdout: Buffer.from(
+-          command.command === method
+-            ? method === "vp"
+-              ? JSON.stringify([{ name: "@opencode/cli", version: "2.3.4" }])
+-              : "@opencode/cli@2.3.4"
+-            : command.command === "vp"
+-              ? "[]"
+-              : "opencode-ai@1.0.0",
+-        ),
+-      }))
+-      expect(yield* test.updater.method()).toBe(method)
+-      expect(test.commands).toEqual([
+-        ["npm", "list", "-g", "--depth=0", "@opencode/cli"],
+-        ["pnpm", "list", "-g", "--depth=0", "@opencode/cli"],
+-        ["bun", "pm", "ls", "-g"],
+-        ["yarn", "global", "list"],
+-        ["vp", "list", "-g", "--json", "@opencode/cli"],
+-      ])
+-    }),
+-  )
+-})
+-
+-it.live("method detection tolerates unavailable package managers", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture((command) =>
+-      command.command === "yarn"
+-        ? { stdout: Buffer.from("@opencode/cli@2.3.4") }
+-        : { error: new AppProcess.AppProcessError({ command: command.command }) },
+-    )
+-    expect(yield* test.updater.method()).toBe("yarn")
+-    expect(test.commands).toHaveLength(5)
+-  }),
+-)
+-
+-it.live("vp detection ignores no-match output that repeats the package name", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture((command) => ({
+-      stdout: Buffer.from(command.command === "vp" ? "No global packages matching '@opencode/cli'." : ""),
+-    }))
+-    expect(yield* test.updater.method()).toBeUndefined()
+-  }),
+-)
+-
+-it.live("Homebrew Core installs check and upgrade the Core formula", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture(() => ({}), "@opencode/cli", false, "anomalyco/tap/opencode-v2", "opencode")
+-    expect(yield* test.updater.method()).toBe("brew")
+-    expect(yield* test.updater.latest()).toBe("2.0.21")
+-    yield* test.updater.upgrade("brew", "2.0.21")
+-    expect(test.commands).toEqual([["brew", "upgrade", "opencode"]])
+-    // An explicitly selected method keeps its own release source.
+-    expect(yield* test.updater.latest("npm")).toBe("2.3.4")
+-    expect(test.requests).toEqual([
+-      "https://formulae.brew.sh/api/formula/opencode.json",
+-      "https://opencode.ai/update/api/local/cli/npm?current=local",
+-    ])
+-  }),
+-)
+-;["opencode-v2", "opencode-beta"].forEach((formula) => {
+-  it.live(`Homebrew tap installs of ${formula} use the published tap formula`, () =>
+-    Effect.gen(function* () {
+-      const test = yield* fixture(() => ({}), "@opencode/cli", false, `anomalyco/tap/${formula}`, formula)
+-      expect(yield* test.updater.method()).toBe("brew")
+-      expect(yield* test.updater.latest()).toBe("2.3.4")
+-      yield* test.updater.upgrade("brew", "2.3.4")
+-      expect(test.commands).toEqual([["brew", "upgrade", `anomalyco/tap/${formula}`]])
+-      expect(test.requests).toEqual([
+-        "https://opencode.ai/update/api/local/cli/homebrew?current=local",
+-        "https://opencode.ai/update/api/local/cli/homebrew?current=local",
+-      ])
+-    }),
+-  )
+-})
+-
+-const winget = (search: Partial<AppProcess.RunResult>) =>
+-  fixture(
+-    (command) => (command.args[0] === "search" ? search : {}),
+-    "@opencode/cli",
+-    false,
+-    "@opencode/cli",
+-    undefined,
+-    (root) =>
+-      Effect.succeed(
+-        path.join(
+-          root,
+-          "AppData",
+-          "Local",
+-          "Microsoft",
+-          "WinGet",
+-          "Packages",
+-          "Anomaly.OpenCode_Microsoft.Winget.Source_8wekyb3d8bbwe",
+-          "opencode.exe",
+-        ),
+-      ),
+-  )
+-const wingetArgs = [
+-  "--id",
+-  "Anomaly.OpenCode",
+-  "--exact",
+-  "--source",
+-  "winget",
+-  "--accept-source-agreements",
+-  "--disable-interactivity",
+-]
+-
+-it.live("WinGet installs check, upgrade, and remove the version in the WinGet index", () =>
+-  Effect.gen(function* () {
+-    const test = yield* winget({
+-      stdout: Buffer.from(
+-        "Name     Id               Version\r\n------------------------------\r\nOpenCode Anomaly.OpenCode 2.0.28\r\n",
+-      ),
+-    })
+-    expect(yield* test.updater.method()).toBe("winget")
+-    expect(yield* test.updater.latest()).toBe("2.0.28")
+-    yield* test.updater.upgrade("winget", "v2.0.28")
+-    const removal = test.updater.removal("winget")
+-    if (!removal) return yield* Effect.die("Expected winget removal command")
+-    yield* removal.run
+-    expect(test.commands).toEqual([
+-      ["winget", "search", ...wingetArgs],
+-      ["winget", "upgrade", ...wingetArgs, "--version", "2.0.28", "--silent", "--accept-package-agreements"],
+-      ["winget", "uninstall", ...wingetArgs],
+-    ])
+-    // WinGet moderates submissions, so the OpenCode release service may list a version WinGet cannot install yet.
+-    expect(test.requests).toEqual([])
+-  }),
+-)
+-
+-it.live("WinGet update checks report a missing package instead of a version", () =>
+-  Effect.gen(function* () {
+-    const test = yield* winget({
+-      exitCode: -1978335212,
+-      stdout: Buffer.from("No package found matching input criteria.\r\n"),
+-    })
+-    const error = yield* test.updater.latest().pipe(Effect.flip)
+-    expect(error.message).toBe("No package found matching input criteria.")
+-  }),
+-)
+-
+-// Links are named opencode-upgrade-<pid>-<random>.exe; read them from inside the installer run.
+-const links = (directory: string) =>
+-  existsSync(directory) ? readdirSync(directory).filter((name) => name.startsWith("opencode-")) : []
+-const upgradeLinks = (directory: string) =>
+-  links(directory).filter((name) => name.startsWith(`opencode-upgrade-${process.pid}-`))
+-
+-windows("windows keeps a second link to the running binary in the cache while the installer runs", () =>
+-  Effect.gen(function* () {
+-    const layout = { executable: "", cache: "" }
+-    const test = yield* fixture(() => {
+-      expect(readFileSync(layout.executable, "utf8")).toBe("binary")
+-      const held = upgradeLinks(layout.cache)
+-      expect(held).toHaveLength(1)
+-      expect(readFileSync(path.join(layout.cache, held[0]), "utf8")).toBe("binary")
+-      return {}
+-    })
+-    layout.executable = test.executable
+-    layout.cache = test.global.cache
+-    yield* test.fs.makeDirectory(test.global.cache, { recursive: true })
+-    // pid 999999999 does not exist; pid 4 is System, alive but not openable (EPERM).
+-    yield* test.fs.writeFileString(path.join(test.global.cache, "opencode-upgrade-999999999-dead.exe"), "exited")
+-    yield* test.fs.writeFileString(path.join(test.global.cache, "opencode-service-4-aa.exe"), "inaccessible")
+-    yield* test.updater.upgrade("bun", "2.3.4")
+-    expect(test.commands).toHaveLength(1)
+-    // The installed path never disappears; the extra link is released and only dead ones are swept.
+-    expect(yield* test.fs.readFileString(test.executable)).toBe("binary")
+-    expect(links(test.global.cache)).toEqual(["opencode-service-4-aa.exe"])
+-  }),
+-)
+-
+-windows("windows releases the link when the installer fails", () =>
+-  Effect.gen(function* () {
+-    const layout = { cache: "" }
+-    const test = yield* fixture(() => {
+-      expect(upgradeLinks(layout.cache)).toHaveLength(1)
+-      return { exitCode: 1, stderr: Buffer.from("registry denied access") }
+-    })
+-    layout.cache = test.global.cache
+-    const error = yield* test.updater.upgrade("npm", "2.3.4").pipe(Effect.flip)
+-    expect(error.message).toBe("registry denied access")
+-    expect(yield* test.fs.readFileString(test.executable)).toBe("binary")
+-    expect(links(test.global.cache)).toEqual([])
+-  }),
+-)
+-
+-windows("windows keeps the uninstall link in the temporary directory, not the removed cache", () =>
+-  Effect.gen(function* () {
+-    const layout = { tmp: "" }
+-    const test = yield* fixture(() => {
+-      expect(upgradeLinks(layout.tmp)).toHaveLength(1)
+-      return {}
+-    })
+-    layout.tmp = test.global.tmp
+-    yield* test.fs.makeDirectory(test.global.cache, { recursive: true })
+-    const removal = test.updater.removal("bun")
+-    if (!removal) return yield* Effect.die("Expected bun removal command")
+-    yield* removal.run
+-    expect(test.commands).toEqual([["bun", "remove", "--global", "@opencode/cli"]])
+-    expect(links(test.global.cache)).toEqual([])
+-    expect(links(test.global.tmp)).toEqual([])
+-  }),
+-)
+-
+-windows("windows links the curl binary before the installer replaces it", () =>
+-  Effect.gen(function* () {
+-    const layout = { executable: "", cache: "" }
+-    const test = yield* fixture(
+-      (command) => {
+-        if (path.basename(command.command, ".exe") === "bash") {
+-          expect(readFileSync(layout.executable, "utf8")).toBe("binary")
+-          expect(upgradeLinks(layout.cache)).toHaveLength(1)
+-        }
+-        return {}
+-      },
+-      "@opencode/cli",
+-      false,
+-      "@opencode/cli",
+-      undefined,
+-      (_root, home) => Effect.succeed(path.join(home, ".opencode", "bin", "opencode.exe")),
+-    )
+-    layout.executable = test.executable
+-    layout.cache = test.global.cache
+-    const original = process.execPath
+-    process.execPath = layout.executable
+-    yield* Effect.addFinalizer(() => Effect.sync(() => (process.execPath = original)))
+-    expect(yield* test.updater.method()).toBe("curl")
+-    yield* test.updater.upgrade("curl", "2.3.4")
+-    expect(test.commands.map((command) => command[0])).toEqual(["curl", test.bash])
+-    expect(yield* test.fs.readFileString(layout.executable)).toBe("binary")
+-    expect(links(test.global.cache)).toEqual([])
+-  }),
+-)
+-
+-unix("curl method detection resolves symlinked home directories", () =>
+-  Effect.gen(function* () {
+-    const test = yield* fixture(
+-      () => ({}),
+-      "@opencode/cli",
+-      false,
+-      "@opencode/cli",
+-      undefined,
+-      (root, home) =>
+-        Effect.gen(function* () {
+-          const fs = yield* FileSystem.FileSystem
+-          const realHome = path.join(root, "real-home")
+-          const bin = path.join(realHome, ".opencode", "bin", "opencode")
+-          yield* fs.makeDirectory(path.dirname(bin), { recursive: true })
+-          yield* fs.symlink(realHome, home)
+-          return bin
+-        }),
+-    )
+-    expect(yield* test.updater.method()).toBe("curl")
+-    expect(test.commands).toEqual([])
+-  }),
+-)
+-
+-windows("windows leaves a source checkout's runtime alone", () =>
+-  Effect.gen(function* () {
+-    const layout = { cache: "" }
+-    const test = yield* fixture(() => {
+-      expect(links(layout.cache)).toEqual([])
+-      return {}
+-    }, "not-opencode")
+-    layout.cache = test.global.cache
+-    yield* test.updater.upgrade("bun", "2.3.4")
+-    expect(test.commands).toHaveLength(1)
+-  }),
+-)
+-
+-unix("other platforms never link the running binary", () =>
+-  Effect.gen(function* () {
+-    const layout = { cache: "" }
+-    const test = yield* fixture(() => {
+-      expect(links(layout.cache)).toEqual([])
+-      return {}
+-    })
+-    layout.cache = test.global.cache
+-    yield* test.updater.upgrade("bun", "2.3.4")
+-    expect(yield* test.fs.readFileString(test.executable)).toBe("binary")
+-  }),
+-)
+-
+-test("Node distribution honors the compile-time CLI name", async () => {
+-  const child = Bun.spawn(
+-    [
+-      process.execPath,
+-      "test",
+-      import.meta.path,
+-      "--define",
+-      'OPENCODE_CLI_NAME="opencode2-node"',
+-      "--test-name-pattern",
+-      "^Node distribution resolves the published npm package$",
+-    ],
+-    {
+-      cwd: path.join(import.meta.dir, ".."),
+-      stdout: "ignore",
+-      stderr: "pipe",
+-      // Bun 1.4 can reuse cached modules compiled with different --define values.
+-      env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
+-    },
+-  )
+-  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+-  expect(code, stderr).toBe(0)
+-  expect(stderr).toContain("1 pass")
+-})
+-
+-if (typeof OPENCODE_CLI_NAME === "string" && OPENCODE_CLI_NAME === "opencode2-node") {
+-  it.live("Node distribution resolves the published npm package", () =>
+-    Effect.gen(function* () {
+-      const test = yield* fixture(
+-        (command) => ({
+-          stdout: Buffer.from(command.command === "npm" ? "@opencode/cli-node@2.3.4" : ""),
+-        }),
+-        "@opencode/cli-node",
+-      )
+-      expect(yield* test.updater.method()).toBe("npm")
+-      yield* test.updater.upgrade("npm", "v2.3.4")
+-      yield* test.updater.upgrade("pnpm", "v2.3.4")
+-      yield* test.updater.upgrade("vp", "v2.3.4")
+-      expect(test.commands).toEqual([
+-        ["npm", "list", "-g", "--depth=0", "@opencode/cli-node"],
+-        ["pnpm", "list", "-g", "--depth=0", "@opencode/cli-node"],
+-        ["bun", "pm", "ls", "-g"],
+-        ["yarn", "global", "list"],
+-        ["vp", "list", "-g", "--json", "@opencode/cli-node"],
+-        ["npm", "install", "--global", "--allow-scripts=@opencode/cli-node", "@opencode/cli-node@2.3.4"],
+-        ["pnpm", "add", "--global", "--allow-build=@opencode/cli-node", "@opencode/cli-node@2.3.4"],
+-        ["vp", "update", "-g", "@opencode/cli-node@2.3.4"],
+-      ])
+-    }),
+-  )
+-}
+diff --git a/packages/cli/test/upgrade.test.ts b/packages/cli/test/upgrade.test.ts
+deleted file mode 100644
+index 7ba3b3c..0000000
+--- a/packages/cli/test/upgrade.test.ts
++++ /dev/null
+@@ -1,121 +0,0 @@
+-import { describe, expect, test } from "bun:test"
+-import { mkdtemp, rm } from "node:fs/promises"
+-import os from "node:os"
+-import path from "node:path"
+-
+-describe("upgrade command", () => {
+-  test("is registered in root help and documents its options", async () => {
+-    const root = await cli(["--help"], {}, "../src/index.ts")
+-    const help = await cli(["upgrade", "--help"], {}, "../src/index.ts")
+-    expect(root.exitCode).toBe(0)
+-    expect(root.stdout).toContain("upgrade")
+-    expect(help.exitCode).toBe(0)
+-    expect(help.stdout).toContain("[<target>]")
+-    expect(help.stdout).toContain("--method")
+-    expect(help.stdout).toContain("-m")
+-  })
+-
+-  test("detects the installation method and resolves the latest version", async () => {
+-    const result = await cli([])
+-    expect(result.exitCode).toBe(0)
+-    expect(result.events).toEqual(["method", { latest: "npm" }, { method: "npm", version: "0.0.0-beta-new" }])
+-    expect(result.stdout).toContain("Upgrade complete")
+-  })
+-
+-  test("resolves the latest version for an explicit method without detection", async () => {
+-    const result = await cli(["--method", "pnpm"], { UPGRADE_TEST_METHOD: "brew" })
+-    expect(result.exitCode).toBe(0)
+-    expect(result.events).toEqual([{ latest: "pnpm" }, { method: "pnpm", version: "0.0.0-beta-new" }])
+-  })
+-
+-  test("accepts an explicit version and method without detection or a version lookup", async () => {
+-    const result = await cli(["v0.0.0-beta-target", "--method", "pnpm"])
+-    expect(result.exitCode).toBe(0)
+-    expect(result.events).toEqual([{ method: "pnpm", version: "v0.0.0-beta-target" }])
+-    expect(result.stdout).toContain("0.0.0-beta-old → 0.0.0-beta-target")
+-  })
+-
+-  test("accepts the short method flag and an explicit major upgrade", async () => {
+-    const result = await cli(["2.0.0", "-m", "bun"])
+-    expect(result.exitCode).toBe(0)
+-    expect(result.events).toEqual([{ method: "bun", version: "2.0.0" }])
+-  })
+-
+-  test("accepts vp as an explicit installation method", async () => {
+-    const result = await cli(["2.0.0", "--method", "vp"])
+-    expect(result.exitCode).toBe(0)
+-    expect(result.events).toEqual([{ method: "vp", version: "2.0.0" }])
+-  })
+-
+-  test("skips the already installed version", async () => {
+-    const result = await cli(["v0.0.0-beta-old"])
+-    expect(result.exitCode).toBe(0)
+-    expect(result.events).toEqual(["method"])
+-    expect(result.stdout).toContain("already installed")
+-  })
+-
+-  test("requires an explicit method when detection fails", async () => {
+-    const result = await cli([], { UPGRADE_TEST_METHOD: "unknown" })
+-    expect(result.exitCode).toBe(1)
+-    expect(result.events).toEqual(["method"])
+-    expect(result.stdout).toContain("Pass --method")
+-  })
+-
+-  test("rejects unsupported methods before attempting an upgrade", async () => {
+-    const result = await cli(["--method", "apt"])
+-    expect(result.exitCode).not.toBe(0)
+-    expect(result.events).toEqual([])
+-  })
+-
+-  test("reports version lookup failures without installing", async () => {
+-    const result = await cli([], { UPGRADE_TEST_LATEST_ERROR: "1" })
+-    expect(result.exitCode).toBe(1)
+-    expect(result.events).toEqual(["method", { latest: "npm" }])
+-    expect(result.stdout).toContain("Update check failed")
+-  })
+-
+-  test("reports installation failures with a nonzero exit code", async () => {
+-    const result = await cli([], { UPGRADE_TEST_INSTALL_ERROR: "1" })
+-    expect(result.exitCode).toBe(1)
+-    expect(result.stdout).toContain("Upgrade failed")
+-    expect(result.stdout).toContain("Permission denied")
+-    expect(result.stdout).not.toContain("Upgrade complete")
+-  })
+-})
+-
+-async function cli(args: string[], env: Record<string, string> = {}, entry = "fixture/upgrade.ts") {
+-  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-upgrade-"))
+-  try {
+-    const child = Bun.spawn(
+-      [process.execPath, "--define", 'OPENCODE_VERSION="0.0.0-beta-old"', path.join(import.meta.dir, entry), ...args],
+-      {
+-        cwd: path.join(import.meta.dir, ".."),
+-        env: {
+-          ...process.env,
+-          OPENCODE_TEST_HOME: root,
+-          XDG_DATA_HOME: path.join(root, "data"),
+-          XDG_CONFIG_HOME: path.join(root, "config"),
+-          XDG_CACHE_HOME: path.join(root, "cache"),
+-          XDG_STATE_HOME: path.join(root, "state"),
+-          OPENCODE_DISABLE_AUTOUPDATE: "1",
+-          ...env,
+-        },
+-        stdout: "pipe",
+-        stderr: "pipe",
+-      },
+-    )
+-    const [stdout, stderr, exitCode] = await Promise.all([
+-      new Response(child.stdout).text(),
+-      new Response(child.stderr).text(),
+-      child.exited,
+-    ])
+-    const events = stdout
+-      .split("\n")
+-      .filter((line) => line.startsWith("EVENT "))
+-      .map((line) => JSON.parse(line.slice(6)))
+-    expect(await Bun.file(path.join(root, "state", "opencode", "service-local.json")).exists()).toBe(false)
+-    return { stdout, stderr, exitCode, events }
+-  } finally {
+-    await rm(root, { recursive: true, force: true })
+-  }
+-}
+diff --git a/packages/client/src/effect/api/api.ts b/packages/client/src/effect/api/api.ts
+index 645f3e8..42e0154 100644
+--- a/packages/client/src/effect/api/api.ts
++++ b/packages/client/src/effect/api/api.ts
+@@ -2122,8 +2122,6 @@ export type EventSubscribeInput = {
+         | "tui.command.execute"
+         | "tui.toast.show"
+         | "tui.session.select"
+-        | "installation.updated"
+-        | "installation.update-available"
+         | "vcs.branch.updated"
+         | "mcp.status.changed"
+         | "mcp.resources.changed"
+diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
+index e045b39..5965bf8 100644
+--- a/packages/client/src/promise/generated/types.ts
++++ b/packages/client/src/promise/generated/types.ts
+@@ -2051,24 +2051,6 @@ export type TuiSessionSelect = {
+   data: { sessionID: SessionID }
+ }
+ 
+-export type InstallationUpdated = {
+-  id: EventID
+-  created: number
+-  metadata?: { [x: string]: any }
+-  type: "installation.updated"
+-  location?: LocationRef
+-  data: { version: string }
+-}
+-
+-export type InstallationUpdateAvailable = {
+-  id: EventID
+-  created: number
+-  metadata?: { [x: string]: any }
+-  type: "installation.update-available"
+-  location?: LocationRef
+-  data: { version: string }
+-}
+-
+ export type VcsBranchUpdated = {
+   id: EventID
+   created: number
+@@ -2367,7 +2349,6 @@ export type ConfigEntry =
+         shell?: string
+         model?: string | { providerID: string; model: string; variant?: string }
+         default_agent?: string
+-        update?: "disable" | "notify" | "auto"
+         share?: "manual" | "auto" | "disabled"
+         enterprise?: { url?: string }
+         username?: string
+@@ -2928,8 +2909,6 @@ export type V2Event =
+   | TuiCommandExecute
+   | TuiToastShow
+   | TuiSessionSelect
+-  | InstallationUpdated
+-  | InstallationUpdateAvailable
+   | VcsBranchUpdated
+   | McpStatusChanged
+   | McpResourcesChanged
+@@ -4399,8 +4378,6 @@ export type EventSubscribeInput = {
+         | "tui.command.execute"
+         | "tui.toast.show"
+         | "tui.session.select"
+-        | "installation.updated"
+-        | "installation.update-available"
+         | "vcs.branch.updated"
+         | "mcp.status.changed"
+         | "mcp.resources.changed"
+diff --git a/packages/core/src/config/normalize.ts b/packages/core/src/config/normalize.ts
+index 6263cc4..8a6357d 100644
+--- a/packages/core/src/config/normalize.ts
++++ b/packages/core/src/config/normalize.ts
+@@ -42,7 +42,7 @@ export type Result =
+   | { readonly type: "rejected"; readonly diagnostics: readonly Diagnostic[] }
+ 
+ const options = { errors: "all", onExcessProperty: "ignore" } as const
+-const unsupportedTopLevel = ["logLevel", "server", "subagent_depth", "layout"] as const
++const unsupportedTopLevel = ["logLevel", "server", "subagent_depth", "layout", "update", "autoupdate"] as const
+ const unsupportedExperimental = [
+   "disable_paste_summary",
+   "batch_tool",
+@@ -52,7 +52,6 @@ const unsupportedExperimental = [
+ ] as const
+ const unsupportedProvider = ["id", "whitelist", "blacklist"] as const
+ const unsupportedModel = ["release_date", "attachment", "reasoning", "temperature", "experimental"] as const
+-const LegacyAutoupdate = Schema.Literals([true, false, "notify"])
+ 
+ export function normalize(input: unknown): Result {
+   if (!isRecord(input))
+@@ -70,12 +69,6 @@ export function normalize(input: unknown): Result {
+   const legacySnapshots = own(input, "snapshot")
+     ? decodeEncoded(Schema.Boolean, input.snapshot, ["snapshot"], diagnostics)
+     : undefined
+-  const legacyUpdate = own(input, "autoupdate")
+-    ? decodeValue(LegacyAutoupdate, input.autoupdate, ["autoupdate"], diagnostics)
+-    : undefined
+-  const nativeUpdate = own(input, "update")
+-    ? decodeEncoded(Info.fields.update, input.update, ["update"], diagnostics)
+-    : undefined
+   const legacyShare = own(input, "autoshare")
+     ? decodeValue(Schema.Boolean, input.autoshare, ["autoshare"], diagnostics) === true
+       ? "auto"
+@@ -86,16 +79,6 @@ export function normalize(input: unknown): Result {
+     : undefined
+   if (legacyMedia !== undefined) encoded.media = legacyMedia
+   if (legacySnapshots !== undefined) encoded.snapshots = legacySnapshots
+-  const migratedUpdate =
+-    legacyUpdate === false
+-      ? "disable"
+-      : legacyUpdate === "notify"
+-        ? "notify"
+-        : legacyUpdate === true
+-          ? "auto"
+-          : undefined
+-  const update = prefer(migratedUpdate, nativeUpdate, ["update"], diagnostics)
+-  if (update !== undefined) encoded.update = update
+   if (legacyShare !== undefined) encoded.share = legacyShare
+ 
+   const legacyReferences = decodeMap(input.reference, ConfigReference.Entry, ["reference"], diagnostics, decodeEncoded)
+diff --git a/packages/core/test/config/config.test.ts b/packages/core/test/config/config.test.ts
+index 31e9f23..f414369 100644
+--- a/packages/core/test/config/config.test.ts
++++ b/packages/core/test/config/config.test.ts
+@@ -1253,18 +1253,16 @@ describe("Config", () => {
+     expect(migrateV1({ experimental: { subagent_depth: 2 } }).experimental?.subagent_depth).toBe(2)
+   })
+ 
+-  test("migrates the v1 update policy", () => {
+-    expect(migrateV1({ autoupdate: false }).update).toBe("disable")
+-    expect(migrateV1({ autoupdate: "notify" }).update).toBe("notify")
+-    expect(migrateV1({ autoupdate: true }).update).toBe("auto")
+-    expect(migrateV1({}).update).toBeUndefined()
+-  })
+-
+-  test("normalizes the native auto update policy", () => {
++  test("omits the removed update settings as unsupported", () => {
+     expect(ConfigNormalize.normalize({ update: "auto" })).toEqual({
+       type: "normalized",
+-      encoded: { update: "auto" },
+-      diagnostics: [],
++      encoded: {},
++      diagnostics: [{ kind: "unsupported", path: ["update"], message: "omitted unsupported legacy setting" }],
++    })
++    expect(ConfigNormalize.normalize({ autoupdate: false })).toEqual({
++      type: "normalized",
++      encoded: {},
++      diagnostics: [{ kind: "unsupported", path: ["autoupdate"], message: "omitted unsupported legacy setting" }],
+     })
+   })
+ 
+@@ -1803,7 +1801,6 @@ describe("Config", () => {
+             expect(documents[0]?.info.shell).toBe("/bin/bash")
+             expect(documents[0]?.info.model).toEqual(selection("anthropic/claude"))
+             expect(documents[0]?.info.default_agent).toBe("reviewer")
+-            expect(documents[0]?.info.update).toBe("notify")
+             expect(documents[0]?.info.share).toBe("disabled")
+             expect(documents[0]?.info.enterprise).toEqual({ url: "https://share.example.com" })
+             expect(documents[0]?.info.username).toBe("test-user")
+@@ -2020,7 +2017,6 @@ describe("Config", () => {
+             expect(documents[0]?.info).toBeInstanceOf(Info)
+             expect(documents[0]?.info.shell).toBe("/bin/zsh")
+             expect(documents[0]?.info.default_agent).toBe("reviewer")
+-            expect(documents[0]?.info.update).toBe("disable")
+             expect(documents[0]?.info.snapshots).toBe(false)
+             expect(documents[0]?.info.share).toBe("auto")
+             expect(documents[0]?.info.permissions).toEqual([
+diff --git a/packages/schema/src/config.ts b/packages/schema/src/config.ts
+index e78cbae..048e440 100644
+--- a/packages/schema/src/config.ts
++++ b/packages/schema/src/config.ts
+@@ -36,9 +36,6 @@ export class Info extends Schema.Class<Info>("Config.Info")({
+   default_agent: Schema.String.pipe(optional).annotate({
+     description: "Default primary agent to use when no session agent is selected",
+   }),
+-  update: Schema.Literals(["disable", "notify", "auto"]).pipe(optional).annotate({
+-    description: "Disable updates, notify when one is available, or install updates automatically",
+-  }),
+   share: Schema.Literals(["manual", "auto", "disabled"]).pipe(optional).annotate({
+     description: "Control whether sessions may be shared manually, automatically, or not at all",
+   }),
+diff --git a/packages/schema/src/event-manifest.ts b/packages/schema/src/event-manifest.ts
+index f0c5bd3..04051f6 100644
+--- a/packages/schema/src/event-manifest.ts
++++ b/packages/schema/src/event-manifest.ts
+@@ -11,7 +11,6 @@ import { Event } from "./event.js"
+ import { FileSystem } from "./filesystem.js"
+ import { FileSystemV1 } from "./filesystem-v1.js"
+ import { Form } from "./form.js"
+-import { InstallationEvent } from "./installation-event.js"
+ import { Integration } from "./integration.js"
+ import { LegacyEventV1 } from "./legacy-event.js"
+ import { LspEvent } from "./lsp-event.js"
+@@ -75,7 +74,6 @@ export const ServerDefinitions = Event.inventory(
+   // Current events the TUI consumes from the public stream.
+   ...SessionStatusEvent.Definitions,
+   ...TuiEvent.Definitions,
+-  ...InstallationEvent.Definitions,
+   ...VcsEvent.Definitions,
+   McpEvent.StatusChanged,
+   McpEvent.ResourcesChanged,
+@@ -86,7 +84,6 @@ export const isServer = (event: { readonly type: string }): event is ServerEvent
+ 
+ export const Definitions = Event.inventory(
+   ...foundationDefinitions,
+-  ...InstallationEvent.Definitions,
+   ...featureDefinitions,
+   ...LspEvent.Definitions,
+   ...TuiEvent.Definitions,
+diff --git a/packages/schema/src/installation-event.ts b/packages/schema/src/installation-event.ts
+deleted file mode 100644
+index f36a2df..0000000
+--- a/packages/schema/src/installation-event.ts
++++ /dev/null
+@@ -1,20 +0,0 @@
+-export * as InstallationEvent from "./installation-event.js"
+-
+-import { Schema } from "effect"
+-import { Event } from "./event.js"
+-
+-export const Updated = Event.ephemeral({
+-  type: "installation.updated",
+-  schema: {
+-    version: Schema.String,
+-  },
+-})
+-
+-export const UpdateAvailable = Event.ephemeral({
+-  type: "installation.update-available",
+-  schema: {
+-    version: Schema.String,
+-  },
+-})
+-
+-export const Definitions = Event.inventory(Updated, UpdateAvailable)
+diff --git a/packages/server/src/process.ts b/packages/server/src/process.ts
+index 874ea1b..cb6f8d0 100644
+--- a/packages/server/src/process.ts
++++ b/packages/server/src/process.ts
+@@ -1,10 +1,8 @@
+ export * as ServerProcess from "./process"
+ 
+ import { NodeHttpServer } from "@effect/platform-node"
+-import { Bus } from "@opencode/core/bus"
+ import { SessionRestart } from "@opencode/core/session/execution/restart"
+ import { Schedule } from "@opencode/core/schedule"
+-import { InstallationEvent } from "@opencode/schema/installation-event"
+ import { hasPtyConnectTicketURL } from "@opencode/protocol/groups/pty"
+ import { hasPersistentPtyConnectTicketURL } from "@opencode/protocol/groups/persistent-pty"
+ import { hasMcpClientTicketURL } from "@opencode/protocol/groups/mcp"
+@@ -118,13 +116,9 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
+     yield* Effect.forkIn(Context.get(context, Schedule.Service).run, applicationScope)
+     yield* Ref.set(application, Option.some(Context.get(context, HttpRouter.HttpRouter).asHttpEffect()))
+     yield* status.ready
+-    const bus = Context.get(context, Bus.Service)
+     return {
+       address: bound.http.address,
+       shutdown: shutdown.await,
+-      updateAvailable: (version: string) =>
+-        bus.publish(InstallationEvent.UpdateAvailable, { version }).pipe(Effect.asVoid),
+-      updated: (version: string) => bus.publish(InstallationEvent.Updated, { version }).pipe(Effect.asVoid),
+     }
+   }).pipe(
+     withoutParentSpan,
+diff --git a/packages/server/test/process.test.ts b/packages/server/test/process.test.ts
+index 20ada8b..0d286de 100644
+--- a/packages/server/test/process.test.ts
++++ b/packages/server/test/process.test.ts
+@@ -104,10 +104,6 @@ it.live("authenticates API requests behind the frontend transform while allowing
+     if (!body) return yield* Effect.die(new Error("Event response has no body"))
+     const reader = body.getReader()
+     yield* Effect.promise(() => readUntil(reader, "server.connected"))
+-    yield* server.updateAvailable("2.0.0")
+-    yield* Effect.promise(() => readUntil(reader, "installation.update-available"))
+-    yield* server.updated("2.0.0")
+-    yield* Effect.promise(() => readUntil(reader, "installation.updated"))
+     yield* Effect.promise(() => reader.cancel())
+ 
+     const missing = yield* Effect.promise(() =>
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 4245174..068000e 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -95,7 +95,6 @@ import { openUrl } from "@opencode/util/open"
+ import { PromptRefProvider, usePromptRef } from "./context/prompt"
+ import { Config, ConfigProvider, useConfig } from "./config"
+ import { newSessionLocation } from "./config/new-session-location"
+-import { UpdateNotificationProvider, useUpdateNotification, type UpdateSource } from "./context/update-notification"
+ import { PluginProvider, usePlugin, type PackageSource } from "./plugin/context"
+ import { localPluginDirectories } from "./plugin/discovery"
+ import { PluginRoute, Slot } from "./plugin/render"
+@@ -163,7 +162,6 @@ const appBindingCommands = [
+   "provider.connect",
+   "opencode.settings",
+   "opencode.status",
+-  "opencode.update",
+   "service.restart",
+   "location.reload",
+   "opencode.debug",
+@@ -194,7 +192,6 @@ export type TuiInput = {
+   }
+   args: Args
+   config: Config.Interface
+-  updater?: UpdateSource
+   packages: PackageSource
+   environment?: Readonly<Record<string, string>>
+   terminalHandoff?: () => Promise<
+@@ -241,7 +238,6 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+     : undefined
+   const exit = {
+     session: undefined as SessionEpilogue | undefined,
+-    updatedVersion: undefined as string | undefined,
+     reason: undefined as unknown,
+   }
+   const result = yield* Effect.scoped(
+@@ -327,7 +323,6 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+                 <EpilogueProvider
+                   value={{
+                     session: (value) => (exit.session = value),
+-                    updatedVersion: (version) => (exit.updatedVersion = version),
+                   }}
+                 >
+                   <TuiAppProvider value={input.app}>
+@@ -425,10 +420,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+                                                                     <PromptRefProvider>
+                                                                       <EditorContextProvider>
+                                                                         <AttentionProvider>
+-                                                                          <UpdateNotificationProvider
+-                                                                            updater={input.updater}
+-                                                                          >
+-                                                                            <PanelProvider>
++                                                                          <PanelProvider>
+                                                                               <PluginProvider
+                                                                                 packages={input.packages}
+                                                                                 directories={pluginDirectories}
+@@ -436,7 +428,6 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+                                                                                 <App />
+                                                                               </PluginProvider>
+                                                                             </PanelProvider>
+-                                                                          </UpdateNotificationProvider>
+                                                                         </AttentionProvider>
+                                                                       </EditorContextProvider>
+                                                                     </PromptRefProvider>
+@@ -476,13 +467,13 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+         }
+       })
+       yield* shutdown.await
+-      return { session: exit.session, updatedVersion: exit.updatedVersion, reason: exit.reason }
++      return { session: exit.session, reason: exit.reason }
+     }),
+   )
+   yield* Effect.sync(() => {
+     if (result.reason !== undefined)
+       process.stderr.write((cliErrorMessage(result.reason) ?? errorFormat(result.reason)) + "\n")
+-    const text = epilogue({ session: result.session, updatedVersion: result.updatedVersion })
++    const text = epilogue({ session: result.session })
+     if (text) process.stdout.write(text + "\n")
+   })
+ })
+@@ -503,7 +494,6 @@ function App() {
+   const event = useEvent()
+   const client = useClient()
+   const toast = useToast()
+-  const updater = useUpdateNotification()
+   const theme = useTheme()
+   const { mode, supports, setMode, locked, lock, unlock, afterPaint } = useThemes()
+   const data = useData()
+@@ -1057,17 +1047,6 @@ function App() {
+         },
+         category: "System",
+       },
+-      ...(updater.open
+-        ? [
+-            {
+-              name: "opencode.update",
+-              title: "Update OpenCode",
+-              slash: { name: "update" },
+-              run: () => updater.open?.("manual"),
+-              category: "System",
+-            },
+-          ]
+-        : []),
+       ...(client.restart
+         ? [
+             {
+diff --git a/packages/tui/src/component/dialog-update.tsx b/packages/tui/src/component/dialog-update.tsx
+deleted file mode 100644
+index d474ed5..0000000
+--- a/packages/tui/src/component/dialog-update.tsx
++++ /dev/null
+@@ -1,171 +0,0 @@
+-import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
+-import { Keymap } from "../context/keymap"
+-import { useNewDesigns } from "../config"
+-import { useTheme } from "../context/theme"
+-import type { UpdateState } from "../context/update-notification"
+-import { DialogHeader, DialogLayout, useDialog } from "../ui/dialog"
+-import { errorMessage } from "../util/error"
+-import { Spinner } from "./spinner"
+-
+-export function DialogUpdate(props: {
+-  check?: (signal: AbortSignal) => Promise<string | undefined>
+-  state: () => UpdateState | undefined
+-  skip: () => void
+-  install: () => Promise<void>
+-  restart: () => void
+-}) {
+-  const dialog = useDialog()
+-  const theme = useTheme().surface("dialog")
+-  const newDesigns = useNewDesigns()
+-  const [error, setError] = createSignal<string>()
+-  const [active, setActive] = createSignal(0)
+-  const controller = new AbortController()
+-  onCleanup(() => controller.abort())
+-
+-  dialog.setCentered(true)
+-
+-  const [check] = createResource(
+-    () => props.check,
+-    (check) =>
+-      check(controller.signal).catch((error) => {
+-        if (!controller.signal.aborted) setError(errorMessage(error))
+-        return undefined
+-      }),
+-  )
+-  const state = createMemo(() => {
+-    const message = error()
+-    if (message) return { type: "check-failed" as const, message }
+-    const current = props.state()
+-    if (current?.type === "installing") return current
+-    if (check.loading) return { type: "checking" as const }
+-    const unavailable = check()
+-    if (unavailable) return { type: "unavailable" as const, message: unavailable }
+-    return current ?? { type: "current" as const }
+-  })
+-  const buttons = createMemo(() => {
+-    const type = state().type
+-    if (type === "installing") return []
+-    const confirm =
+-      type === "available"
+-        ? { label: "Update", run: props.install }
+-        : type === "installed"
+-          ? { label: "Restart", run: props.restart }
+-          : undefined
+-    return [
+-      {
+-        label: "Skip",
+-        run: () => {
+-          props.skip()
+-          dialog.clear()
+-        },
+-      },
+-      ...(confirm ? [confirm] : []),
+-    ]
+-  })
+-
+-  createEffect(() => setActive(Math.max(0, buttons().length - 1)))
+-
+-  Keymap.createLayer(() => ({
+-    mode: "modal",
+-    commands: [
+-      {
+-        bind: "return",
+-        title: "Confirm update action",
+-        group: "Dialog",
+-        run: () => void buttons()[newDesigns() ? buttons().length - 1 : active()]?.run(),
+-      },
+-      ...(newDesigns() ? [] : ["left", "right", "tab", "shift+tab"]).map((bind) => ({
+-        bind,
+-        title: bind === "left" || bind === "shift+tab" ? "Previous update action" : "Next update action",
+-        group: "Dialog",
+-        run: () => {
+-          const count = buttons().length
+-          if (count) setActive((value) => (value + 1) % count)
+-        },
+-      })),
+-    ],
+-  }))
+-
+-  return (
+-    <DialogLayout
+-      header={
+-        <DialogHeader
+-          title={
+-            state().type === "installing"
+-              ? "Updating OpenCode"
+-              : state().type === "available" || state().type === "failed"
+-                ? "Update available"
+-                : "Update"
+-          }
+-        />
+-      }
+-      footer={{
+-        actions: {
+-          primary: buttons().map((button, index) => ({
+-            title: button.label.toLowerCase(),
+-            key: index === buttons().length - 1 ? "enter" : undefined,
+-            onTrigger: () => void button.run(),
+-          })),
+-        },
+-      }}
+-      legacyFooter={
+-        <Show when={buttons().length > 0}>
+-          <box flexDirection="row" justifyContent="flex-end">
+-            <For each={buttons()}>
+-              {(button, index) => (
+-                <box
+-                  paddingLeft={1}
+-                  paddingRight={1}
+-                  backgroundColor={active() === index() ? theme.background.action.primary.focused : undefined}
+-                  onMouseUp={() => void button.run()}
+-                >
+-                  <text fg={active() === index() ? theme.text.action.primary.focused : theme.text.muted}>
+-                    {button.label}
+-                  </text>
+-                </box>
+-              )}
+-            </For>
+-          </box>
+-        </Show>
+-      }
+-    >
+-      <Show when={state()} keyed>
+-        {(current) => (
+-          <Switch>
+-            <Match when={current.type === "checking"}>
+-              <Spinner shimmer={theme.text.base}>Checking for updates…</Spinner>
+-            </Match>
+-            <Match when={current.type === "available"}>
+-              <text fg={theme.text.muted}>
+-                An update is available. After installing, you'll be prompted to restart OpenCode.
+-              </text>
+-            </Match>
+-            <Match when={current.type === "installing"}>
+-              <Spinner shimmer={theme.text.base}>
+-                {current.type === "installing" ? `Installing OpenCode ${current.version}…` : ""}
+-              </Spinner>
+-            </Match>
+-            <Match when={current.type === "installed"}>
+-              <text fg={theme.text.muted} wrapMode="word">
+-                Update successful! Restart closes OpenCode, then run opencode to use the new version.
+-              </text>
+-            </Match>
+-            <Match when={current.type === "current"}>
+-              <text fg={theme.text.muted}>OpenCode is already up to date.</text>
+-            </Match>
+-            <Match when={current.type === "unavailable"}>
+-              <text fg={theme.text.muted} wrapMode="word">
+-                {current.type === "unavailable" ? current.message : ""}
+-              </text>
+-            </Match>
+-            <Match when={current.type === "failed" || current.type === "check-failed"}>
+-              <text fg={theme.text.feedback.error.base}>
+-                {current.type === "failed" || current.type === "check-failed" ? current.message : ""}
+-              </text>
+-            </Match>
+-          </Switch>
+-        )}
+-      </Show>
+-    </DialogLayout>
+-  )
+-}
+diff --git a/packages/tui/src/context/epilogue.tsx b/packages/tui/src/context/epilogue.tsx
+index dab83d3..5d6b6a7 100644
+--- a/packages/tui/src/context/epilogue.tsx
++++ b/packages/tui/src/context/epilogue.tsx
+@@ -4,8 +4,6 @@ import type { SessionEpilogue } from "../util/presentation"
+ // What the banner printed after the TUI closes should mention.
+ export type Epilogue = {
+   session(value?: SessionEpilogue): void
+-  // The version a local update installed while the TUI was running.
+-  updatedVersion(version: string): void
+ }
+ 
+ export const { use: useEpilogue, provider: EpilogueProvider } = createSimpleContext({
+diff --git a/packages/tui/src/context/update-notification.tsx b/packages/tui/src/context/update-notification.tsx
+deleted file mode 100644
+index 0b5f942..0000000
+--- a/packages/tui/src/context/update-notification.tsx
++++ /dev/null
+@@ -1,158 +0,0 @@
+-import { createSignal, onCleanup, onMount } from "solid-js"
+-import { createSimpleContext } from "./helper"
+-import { useLog } from "./log"
+-import { useStorage } from "./storage"
+-import { useEvent } from "./event"
+-import { errorMessage } from "../util/error"
+-import { useExit } from "./exit"
+-import { useEpilogue } from "./epilogue"
+-import { useDialog } from "../ui/dialog"
+-import { DialogUpdate } from "../component/dialog-update"
+-
+-type ClientNotice = { readonly type: "available" | "installed"; readonly version: string }
+-type Notice = ClientNotice & ({ readonly source: "client" } | { readonly source: "server"; readonly remote: boolean })
+-export type UpdateState =
+-  | ClientNotice
+-  | { readonly type: "installing"; readonly version: string }
+-  | { readonly type: "failed"; readonly message: string }
+-
+-export type UpdateSource = {
+-  readonly remote: boolean
+-  readonly subscribe: (notify: (notice: ClientNotice) => void) => () => void
+-  readonly check: (
+-    signal: AbortSignal,
+-    onInstall: (version: string) => void,
+-  ) => Promise<ClientNotice | { readonly type: "unavailable"; readonly message: string } | undefined>
+-  readonly apply: (version: string) => Promise<void>
+-}
+-
+-export const { use: useUpdateNotification, provider: UpdateNotificationProvider } = createSimpleContext({
+-  name: "UpdateNotification",
+-  init: (props: { updater?: UpdateSource }) => {
+-    const event = useEvent()
+-    const exit = useExit()
+-    const epilogue = useEpilogue()
+-    const dialog = useDialog()
+-    const log = useLog({ component: "update-notification" })
+-    const [state, setState] = createSignal<UpdateState>()
+-    const [notification, setNotification] = createSignal<Notice>()
+-    const [notifications, markNotification] = useStorage().store<{ versions: string[] }>("update-notifications", {
+-      initial: { versions: [] },
+-    })
+-
+-    const notify = (notice: Notice) => {
+-      if (!props.updater) return
+-      // Every way out of the TUI after a local install tells the user to start the new version.
+-      if (notice.type === "installed" && !(notice.source === "server" && notice.remote))
+-        epilogue.updatedVersion(notice.version)
+-      if (
+-        notifications.versions.includes(`${notice.source}:${notice.version}`) ||
+-        (notice.source === "client" && notifications.versions.includes(notice.version))
+-      )
+-        return
+-      setNotification((current) => {
+-        if (notice.source === "server" && current?.source === "client") return current
+-        return notice
+-      })
+-    }
+-
+-    const dismiss = () => {
+-      const current = notification()
+-      if (!current) return
+-      setNotification(undefined)
+-      // Only interactions with the automatic notification update its history.
+-      void markNotification((draft) => {
+-        draft.versions = [...draft.versions, `${current.source}:${current.version}`].slice(-100)
+-      }).catch((error) => log.error("failed to persist update notification", { error }))
+-    }
+-
+-    const install = async () => {
+-      const updater = props.updater
+-      const current = state()
+-      if (!updater || !current || current.type !== "available") return
+-      setState({ type: "installing", version: current.version })
+-      await updater.apply(current.version).then(
+-        () => {
+-          epilogue.updatedVersion(current.version)
+-          setState({ type: "installed", version: current.version })
+-        },
+-        (error) => setState({ type: "failed", message: errorMessage(error) }),
+-      )
+-    }
+-
+-    const check = async (signal: AbortSignal) => {
+-      const updater = props.updater
+-      if (!updater || state()?.type === "installing") return
+-      const result = await updater
+-        .check(signal, (version) => {
+-          if (!signal.aborted) setState({ type: "installing", version })
+-        })
+-        .finally(() => {
+-          if (state()?.type === "installing") setState(undefined)
+-        })
+-      if (signal.aborted) return
+-      if (result?.type === "unavailable") return result.message
+-      if (result?.type === "installed") epilogue.updatedVersion(result.version)
+-      setState(result)
+-    }
+-
+-    const restart = () => {
+-      const current = state()
+-      if (current?.type !== "installed") return
+-      exit()
+-    }
+-
+-    const open = (origin: "manual" | "notification") => {
+-      if (!props.updater) return
+-      const current = notification()
+-      const known = current && (current.source === "client" || !current.remote) ? current : undefined
+-      if (origin === "notification" && !known) return
+-      const active = state()
+-      // The notification can predate an installation through /update.
+-      if (known && active?.type !== "installing" && !(active?.type === "installed" && active.version === known.version))
+-        setState({ type: known.type, version: known.version })
+-      const status = state()?.type
+-      dialog.replace(() => (
+-        <DialogUpdate
+-          check={status === undefined || status === "failed" ? check : undefined}
+-          state={state}
+-          skip={dismiss}
+-          install={install}
+-          restart={restart}
+-        />
+-      ))
+-    }
+-
+-    onMount(() => {
+-      if (!props.updater) return
+-      onCleanup(props.updater.subscribe((notice) => notify({ ...notice, source: "client" })))
+-    })
+-
+-    onCleanup(
+-      event.on("installation.update-available", (event) =>
+-        notify({
+-          source: "server",
+-          remote: props.updater?.remote ?? false,
+-          type: "available",
+-          version: event.data.version,
+-        }),
+-      ),
+-    )
+-    onCleanup(
+-      event.on("installation.updated", (event) =>
+-        notify({
+-          source: "server",
+-          remote: props.updater?.remote ?? false,
+-          type: "installed",
+-          version: event.data.version,
+-        }),
+-      ),
+-    )
+-
+-    return {
+-      notification,
+-      dismiss,
+-      open: props.updater ? open : undefined,
+-    }
+-  },
+-})
+diff --git a/packages/tui/src/routes/home.tsx b/packages/tui/src/routes/home.tsx
+index 71e7b64..1ae6e9e 100644
+--- a/packages/tui/src/routes/home.tsx
++++ b/packages/tui/src/routes/home.tsx
+@@ -11,10 +11,6 @@ import { useLocation } from "../context/location"
+ import { FormPrompt } from "./session/form"
+ import { Slot } from "../plugin/render"
+ import { useTerminalDimensions } from "@opentui/solid"
+-import { useTheme } from "../context/theme"
+-import { useUpdateNotification } from "../context/update-notification"
+-import { useExit } from "../context/exit"
+-import { FadeInText } from "../component/fade-in-text"
+ 
+ let once = false
+ const placeholder = {
+@@ -32,7 +28,6 @@ export function Home() {
+   const data = useData()
+   const location = useLocation()
+   const dimensions = useTerminalDimensions()
+-  const [logoWidth, setLogoWidth] = createSignal(0)
+   // Global MCP elicitations can arrive without a session route, so keep them reachable from Home.
+   const currentLocation = () => route.location ?? data.location.default()
+   const forms = createMemo(() => data.session.form.list("global", currentLocation()) ?? [])
+@@ -88,16 +83,10 @@ export function Home() {
+       >
+         <box flexGrow={1} minHeight={0} />
+         <box height={3} minHeight={0} flexShrink={1} />
+-        <box
+-          flexShrink={0}
+-          onSizeChange={function () {
+-            setLogoWidth(this.width)
+-          }}
+-        >
++        <box flexShrink={0}>
+           <Logo />
+         </box>
+         <box height={1} flexShrink={0} />
+-        <UpdateNotification width={logoWidth()} />
+         <box width="100%" maxWidth={75} zIndex={1000} paddingTop={1} flexShrink={0} position="relative">
+           <Prompt ref={bind} placeholders={placeholder} disabled={forms().length > 0} />
+         </box>
+@@ -121,56 +110,3 @@ export function Home() {
+     </>
+   )
+ }
+-
+-function UpdateNotification(props: { width: number }) {
+-  const update = useUpdateNotification()
+-  const exit = useExit()
+-  const theme = useTheme()
+-  const [hovered, setHovered] = createSignal(false)
+-  const backdrop = () => (hovered() ? theme.background.action.primary.hovered : theme.background.base)
+-  createEffect(() => {
+-    update.notification()
+-    setHovered(false)
+-  })
+-
+-  return (
+-    <Show when={update.notification()} keyed>
+-      {(state) => {
+-        const remote = state.source === "server" && state.remote
+-        return (
+-          <Show when={!remote || state.type === "available"}>
+-            <box
+-              flexShrink={0}
+-              flexDirection="row"
+-              justifyContent="center"
+-              width={props.width}
+-              maxWidth="100%"
+-              gap={1}
+-              backgroundColor={hovered() ? theme.background.action.primary.hovered : undefined}
+-              onMouseOver={() => setHovered(true)}
+-              onMouseOut={() => setHovered(false)}
+-              onMouseUp={() => {
+-                if (remote) return update.dismiss()
+-                if (state.type === "installed") return exit()
+-                update.open?.("notification")
+-              }}
+-            >
+-              <FadeInText fg={theme.text.muted} backdrop={backdrop()}>
+-                <Show when={!remote}>
+-                  <span style={{ fg: theme.text.action.primary.selected }}>
+-                    {state.type === "installed" ? "/exit" : "/update"}
+-                  </span>
+-                </Show>
+-                {remote
+-                  ? "remote server update available"
+-                  : state.type === "installed"
+-                    ? ` restart to use v${state.version}`
+-                    : ` to install v${state.version}`}
+-              </FadeInText>
+-            </box>
+-          </Show>
+-        )
+-      }}
+-    </Show>
+-  )
+-}
+diff --git a/packages/tui/src/util/presentation.ts b/packages/tui/src/util/presentation.ts
+index d6416a0..79c825c 100644
+--- a/packages/tui/src/util/presentation.ts
++++ b/packages/tui/src/util/presentation.ts
+@@ -26,15 +26,12 @@ function wordmark(pad = "") {
+ export type SessionEpilogue = { readonly title: string; readonly sessionID?: string }
+ 
+ // Printed after the TUI closes.
+-export function epilogue(input: { readonly session?: SessionEpilogue; readonly updatedVersion?: string }) {
+-  if (!input.session && !input.updatedVersion) return
++export function epilogue(input: { readonly session?: SessionEpilogue }) {
++  if (!input.session) return
+   const row = (label: string, value: string) => `  ${dim}${label.padEnd(10, " ")}${reset}${bold}${value}${reset}`
+   return [
+     ...wordmark("  "),
+     "",
+-    ...(input.updatedVersion
+-      ? [`  ${dim}Run ${reset}${bold}opencode${reset}${dim} to use ${reset}${bold}${input.updatedVersion}${reset}`, ""]
+-      : []),
+     ...(input.session
+       ? [row("Session", input.session.title), row("Continue", `opencode -s ${input.session.sessionID}`), ""]
+       : []),
+diff --git a/packages/tui/test/cli/tui/use-event.test.tsx b/packages/tui/test/cli/tui/use-event.test.tsx
+index 34c5fe6..185d24f 100644
+--- a/packages/tui/test/cli/tui/use-event.test.tsx
++++ b/packages/tui/test/cli/tui/use-event.test.tsx
+@@ -35,14 +35,12 @@ function vcs(branch: string): OpenCodeEvent {
+   }
+ }
+ 
+-function update(version: string): OpenCodeEvent {
++function configured(): OpenCodeEvent {
+   return {
+-    id: `evt_update_${version}`,
++    id: "evt_config",
+     created: 0,
+-    type: "installation.update-available",
+-    data: {
+-      version,
+-    },
++    type: "config.updated",
++    data: {},
+   }
+ }
+ 
+@@ -163,11 +161,11 @@ describe("useEvent", () => {
+     const { app, emit, seen } = await mount()
+ 
+     try {
+-      emit(event(update("1.2.3"), { directory: "global" }))
++      emit(event(configured(), { directory: "global" }))
+ 
+       await wait(() => seen.length === 1)
+ 
+-      expect(seen).toEqual([event(update("1.2.3"), { directory: "global" })])
++      expect(seen).toEqual([event(configured(), { directory: "global" })])
+     } finally {
+       app.renderer.destroy()
+     }
+diff --git a/packages/tui/test/component/dialog-update.test.tsx b/packages/tui/test/component/dialog-update.test.tsx
+deleted file mode 100644
+index 066933e..0000000
+--- a/packages/tui/test/component/dialog-update.test.tsx
++++ /dev/null
+@@ -1,62 +0,0 @@
+-/** @jsxImportSource @opentui/solid */
+-import { testRender } from "@opentui/solid"
+-import { expect, test } from "bun:test"
+-import { createSignal } from "solid-js"
+-import { DialogUpdate } from "../../src/component/dialog-update"
+-import { ConfigProvider } from "../../src/config"
+-import type { UpdateState } from "../../src/context/update-notification"
+-import { Keymap } from "../../src/context/keymap"
+-import { ThemeProvider } from "../../src/context/theme"
+-import { DialogProvider } from "../../src/ui/dialog"
+-import { ToastProvider } from "../../src/ui/toast"
+-import { emptyThemeSource, tmpdir } from "../fixture/fixture"
+-import { TestTuiContexts } from "../fixture/tui-environment"
+-import { createTuiResolvedConfig } from "../fixture/tui-runtime"
+-
+-test("installation progress replaces checking while the update job is still pending", async () => {
+-  await using temporary = await tmpdir()
+-  const [state, setState] = createSignal<UpdateState>()
+-  const pending = Promise.withResolvers<string | undefined>()
+-  const app = await testRender(
+-    () => (
+-      <TestTuiContexts directory={temporary.path} paths={{ state: temporary.path }}>
+-        <ConfigProvider config={createTuiResolvedConfig()}>
+-          <ThemeProvider mode="dark" source={emptyThemeSource}>
+-            <Keymap.Provider>
+-              <ToastProvider>
+-                <DialogProvider>
+-                  <DialogUpdate
+-                    check={() => pending.promise}
+-                    state={state}
+-                    skip={() => {}}
+-                    install={() => Promise.resolve()}
+-                    restart={() => {}}
+-                  />
+-                </DialogProvider>
+-              </ToastProvider>
+-            </Keymap.Provider>
+-          </ThemeProvider>
+-        </ConfigProvider>
+-      </TestTuiContexts>
+-    ),
+-    { width: 80, height: 24, kittyKeyboard: true },
+-  )
+-
+-  try {
+-    app.renderer.start()
+-    await app.waitForFrame((frame) => frame.includes("Checking for updates"))
+-    setState({ type: "installing", version: "2.0.0" })
+-    await app.waitForFrame(
+-      (frame) =>
+-        frame.includes("Updating OpenCode") &&
+-        frame.includes("Installing OpenCode 2.0.0") &&
+-        !frame.includes("Checking"),
+-    )
+-    expect(app.captureCharFrame()).not.toContain("Skip")
+-    pending.reject(new Error("Update service unavailable"))
+-    await app.waitForFrame((frame) => frame.includes("Update service unavailable") && !frame.includes("Installing"))
+-  } finally {
+-    pending.resolve(undefined)
+-    app.renderer.destroy()
+-  }
+-})
+diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/util/presentation.test.ts
+index e4a8e4d..cab8b8f 100644
+--- a/packages/tui/test/util/presentation.test.ts
++++ b/packages/tui/test/util/presentation.test.ts
+@@ -6,7 +6,7 @@ const rows = (text: string | undefined) =>
+     .split("\n")
+     .filter((line) => line.trim() && !/[▀▄█]/.test(line))
+ 
+-test("prints nothing without a session or update", () => {
++test("prints nothing without a session", () => {
+   expect(epilogue({})).toBeUndefined()
+ })
+ 
+@@ -17,14 +17,4 @@ test("formats session continuation summary", () => {
+   ])
+ })
+ 
+-test("tells the user to start OpenCode again after an update", () => {
+-  expect(rows(epilogue({ updatedVersion: "2.0.0" }))).toEqual(["  Run opencode to use 2.0.0"])
+-})
+ 
+-test("keeps the session continuation after an update", () => {
+-  expect(rows(epilogue({ session: { title: "A session", sessionID: "ses_123" }, updatedVersion: "2.0.0" }))).toEqual([
+-    "  Run opencode to use 2.0.0",
+-    "  Session   A session",
+-    "  Continue  opencode -s ses_123",
+-  ])
+-})
+-- 
+2.43.0
+

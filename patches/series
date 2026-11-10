@@ -5,6 +5,7 @@
 #   01-cli-tui-only/         patches 0001-0004 (split for the 100 MB limit)
 #   02-providers-and-models/ patch 0005
 #   03-termux-bionic/        patch 0006
+#   04-no-self-update/       patch 0007
 # Numbering is dense and global: files are numbered 0001, 0002, ... in
 # apply order across all groups, with no gaps. A new patch takes the
 # next free number. See README.md in this directory for the rules.
@@ -14,3 +15,4 @@
 01-cli-tui-only/0004-remove-all-references-to-deleted-envs.patch
 02-providers-and-models/0005-keep-only-opencode-free-models-and-custom-providers.patch
 03-termux-bionic/0006-add-termux-bionic-native-build.patch
+04-no-self-update/0007-remove-the-self-update-feature.patch

@@ -32,13 +32,17 @@ docs site, SDK, hosted services — including all references to them;
 (0005) removes every built-in provider/model except the 47 free
 OpenCode models, keeping user-defined custom providers; (0006) adds
 a native Android (Termux/Bionic) build target whose TUI is bridged
-from the musl OpenTUI library via a small Bionic compat shim.
+from the musl OpenTUI library via a small Bionic compat shim;
+(0007) removes the self-update feature completely — the `upgrade`
+command, the background update checks, the TUI update dialog and
+banner, the installation events, and the `update`/`autoupdate`
+config settings.
 Per-patch detail, including the reasoning, is in `patches/README.md`.
 Patches 0006–0009 of the old numbering (system prompt, tool
 descriptions, agent prompts, delegation enforcement) were
 **withdrawn by the maintainer on 2026-11-09** and are not in the
 series; do not re-add them without the maintainer's explicit
-decision. Their content survives in releases v0.4.0–v0.7.0 and git
+decision. Their content survives in git
 history.
 
 ## Layout
@@ -55,6 +59,7 @@ patches/
   01-cli-tui-only/       patches 0001-0004
   02-providers-and-models/  patch 0005
   03-termux-bionic/      patch 0006
+  04-no-self-update/     patch 0007
 scripts/
   apply-patches.sh       clone baseline + apply the series
   build.sh               the one build entry point (all targets)
