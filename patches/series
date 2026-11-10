@@ -7,6 +7,7 @@
 #   03-termux-bionic/        patches 0006, 0009
 #   04-no-self-update/       patch 0007
 #   05-deletion-cleanup/     patch 0008
+#   06-dedupe-slash-commands/ patch 0010
 # Numbering is dense and global: files are numbered 0001, 0002, ... in
 # apply order across all groups, with no gaps. A new patch takes the
 # next free number. See README.md in this directory for the rules.
@@ -19,3 +20,4 @@
 04-no-self-update/0007-remove-the-self-update-feature.patch
 05-deletion-cleanup/0008-complete-the-total-deletion.patch
 03-termux-bionic/0009-enable-recursive-directory-watching-on-android.patch
+06-dedupe-slash-commands/0010-deduplicate-slash-commands.patch

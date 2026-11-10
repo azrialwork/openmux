@@ -40,7 +40,9 @@ config settings; (0008) completes the earlier deletions — leftover
 pairing/acp tests and the orphaned Claude Agent SDK dependency
 removed; (0009) makes recursive directory watching work on
 Android, replacing patch 0006's parcel-watcher stub with the
-embedded @parcel/watcher android build.
+embedded @parcel/watcher android build; (0010) deduplicates the
+slash commands — the menu lists each command once, under its
+original name, while aliases stay valid input but get no rows.
 Per-patch detail, including the reasoning, is in `patches/README.md`.
 Patches 0006–0009 of the old numbering (system prompt, tool
 descriptions, agent prompts, delegation enforcement) were
@@ -65,6 +67,7 @@ patches/
   03-termux-bionic/      patches 0006, 0009
   04-no-self-update/     patch 0007
   05-deletion-cleanup/   patch 0008
+  06-dedupe-slash-commands/ patch 0010
 scripts/
   apply-patches.sh       clone baseline + apply the series
   build.sh               the one build entry point (all targets)

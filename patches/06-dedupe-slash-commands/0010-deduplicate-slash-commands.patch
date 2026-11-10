@@ -1,0 +1,94 @@
+From a94664edff6c2b7345558d3779464c6f2c0ce000 Mon Sep 17 00:00:00 2001
+From: azrialwork <azrial.work@gmail.com>
+Date: Wed, 11 Nov 2026 01:34:23 +0700
+Subject: [PATCH] fix(tui): list each slash command once, under its original
+ name
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The slash menu expanded every alias into its own row, so one command appeared several times under different names (Sessions as /sessions, /resume and /continue; Exit as /exit, /quit and /q; Open and Variants likewise). The autocomplete now emits a single row per command — its primary slash name — and carries the aliases as search keywords, so typing an alias still surfaces the original. Aliases remain valid input: the submit path resolves them exactly as before.
+
+Server commands appended to the same menu were never deduplicated (the name set built for it was never consulted): a config or MCP command named like a built-in slash command — or one of its aliases — produced a second row for a command that can never run, because the keymap command wins at submit time. Those are now skipped, as are repeats across config sources; the first occurrence wins.
+
+The mini footer did the same for its exit commands, listing /exit, /quit and /q as three rows; it now lists /exit only, while isExitCommand still accepts all three.
+---
+ .../tui/src/component/prompt/autocomplete.tsx | 32 +++++++++++++------
+ packages/tui/src/mini/footer.prompt.tsx       |  7 ++--
+ 2 files changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/packages/tui/src/component/prompt/autocomplete.tsx b/packages/tui/src/component/prompt/autocomplete.tsx
+index 444297a..35c7fec 100644
+--- a/packages/tui/src/component/prompt/autocomplete.tsx
++++ b/packages/tui/src/component/prompt/autocomplete.tsx
+@@ -489,19 +489,33 @@ export function Autocomplete(props: {
+   }
+ 
+   const commands = createMemo((): AutocompleteOption[] => {
+-    const results: AutocompleteOption[] = keymapCommands().flatMap((command) => {
++    // One row per command, under its original (primary) slash name. Aliases
++    // remain valid input — the submit path resolves them — but they no
++    // longer get rows of their own; they ride along as search keywords so
++    // typing one still surfaces the original command.
++    const taken = new Set<string>()
++    const results: AutocompleteOption[] = []
++    for (const command of keymapCommands()) {
+       const slash = command.slash
+-      if (!slash) return []
+-      return [slash.name, ...(slash.aliases ?? [])].map((name) => ({
+-        display: `/${name}`,
++      if (!slash) continue
++      if (taken.has(slash.name)) continue
++      taken.add(slash.name)
++      for (const alias of slash.aliases ?? []) taken.add(alias)
++      results.push({
++        display: `/${slash.name}`,
+         description: command.description ?? command.title,
+-        onSelect: slash.arguments ? () => insertSlash(name) : command.run,
+-      }))
+-    })
+-    const commandNames = new Set<string>()
++        aliases: slash.aliases?.slice(),
++        onSelect: slash.arguments ? () => insertSlash(slash.name) : command.run,
++      })
++    }
+ 
+     for (const serverCommand of data.location.command.list(location.current) ?? []) {
+-      commandNames.add(serverCommand.name)
++      // A server command named like a slash command (or one of its aliases)
++      // can never run — the keymap command wins at submit time — so listing
++      // it would only duplicate the row. First occurrence wins for repeats
++      // across config sources too.
++      if (taken.has(serverCommand.name)) continue
++      taken.add(serverCommand.name)
+       results.push({
+         display: "/" + serverCommand.name,
+         description: serverCommand.description,
+diff --git a/packages/tui/src/mini/footer.prompt.tsx b/packages/tui/src/mini/footer.prompt.tsx
+index b7b2046..46e42fa 100644
+--- a/packages/tui/src/mini/footer.prompt.tsx
++++ b/packages/tui/src/mini/footer.prompt.tsx
+@@ -40,7 +40,6 @@ import { stringWidth } from "../util/string-width"
+ import { errorMessage } from "../util/error"
+ import {
+   createPromptHistory,
+-  EXIT_COMMANDS,
+   isExitCommand,
+   isCompactCommand,
+   mentionTriggerIndex,
+@@ -527,9 +526,9 @@ export function createPromptState(input: PromptInput): PromptState {
+         display: "/compact",
+         description: "compact older session context to free space",
+       } satisfies SlashOption,
+-      ...EXIT_COMMANDS.map(
+-        (name) => ({ kind: "slash", name, display: `/${name}`, description: "close OpenCode" }) satisfies SlashOption,
+-      ),
++      // Only the original name gets a row; /quit and /q still exit via
++      // isExitCommand, they just no longer duplicate the entry.
++      { kind: "slash", name: "exit", display: "/exit", description: "close OpenCode" } satisfies SlashOption,
+     ]
+     const hidden = new Set(builtins.map((item) => item.name))
+     return [
+-- 
+2.43.0
+

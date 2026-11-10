@@ -43,6 +43,7 @@ On top of upstream v2.2.6, the series in `patches/series`:
 | 0006, 0009 (`03-termux-bionic/`) | A native Android (Termux/Bionic) build target, TUI included; recursive directory watching works there too — the real @parcel/watcher android build is embedded |
 | 0007 (`04-no-self-update/`) | The self-update feature is removed completely — no `upgrade` command, no background update checks, no update UI or config settings |
 | 0008 (`05-deletion-cleanup/`) | Completes the earlier deletions: leftover pairing/acp tests and the orphaned Claude Agent SDK dependency are removed |
+| 0010 (`06-dedupe-slash-commands/`) | Slash commands are deduplicated: each command appears once in the slash menu, under its original name — aliases stay valid input but no longer get rows of their own |
 
 Full per-patch notes, including why each patch exists:
 `patches/README.md`.
