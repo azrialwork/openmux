@@ -1,0 +1,24 @@
+name: Set up Android build tools
+description: Install patchelf, expose the preinstalled Android NDK to the build, and provide a GitHub token so the build can fetch the pinned Bun android runtime without hitting the unauthenticated API rate limit. Used by every job that builds the linux-arm64-android target; those jobs run on the x64 image because the NDK's host tools are x86_64 binaries (the android build is a pure cross-compile — the produced binary never runs on the host).
+inputs:
+  token:
+    description: GitHub token to expose to later steps as GH_TOKEN.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Set up Android build tools
+      shell: bash
+      env:
+        INPUT_TOKEN: ${{ inputs.token }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y patchelf
+        # GitHub's x64 images preinstall the Android NDK; make its
+        # location explicit for packages/cli/script/build.ts.
+        if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+          ndk="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/"* 2>/dev/null | sort -V | tail -n 1)"
+          test -n "$ndk"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+        fi
+        echo "GH_TOKEN=$INPUT_TOKEN" >> "$GITHUB_ENV"

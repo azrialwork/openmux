@@ -13,9 +13,11 @@
 # not a failure. Non-zero means the check itself failed.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-upstream_url="$(jq -r .upstream_url "$repo_root/upstream.json")"
-baseline="$(jq -r .baseline_tag "$repo_root/upstream.json")"
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+
+upstream_url="$(upstream_get upstream_url)"
+baseline="$(upstream_get baseline_tag)"
 
 latest_line="$(git ls-remote --tags --sort=-v:refname "$upstream_url" 'refs/tags/v2.*' | head -n 1)"
 if [ -z "$latest_line" ]; then

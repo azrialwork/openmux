@@ -48,31 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
+      - uses: ./.github/actions/setup-runtime
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.4"
-
-      - name: Set up Android build tools
+      - uses: ./.github/actions/setup-android
         if: matrix.target == 'linux-arm64-android'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y patchelf
-          # GitHub images preinstall the Android NDK; make its location
-          # explicit for packages/cli/script/build.ts. GH_TOKEN lets the
-          # build fetch the pinned Bun android runtime without hitting
-          # the unauthenticated GitHub API rate limit.
-          if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-            ndk="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/"* 2>/dev/null | sort -V | tail -n 1)"
-            test -n "$ndk"
-            echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
-          fi
-          echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
+        with:
+          token: ${{ github.token }}
 
       - name: Build openmux (${{ matrix.target }})
         run: scripts/build.sh "${{ matrix.target }}" build/out
@@ -128,14 +109,17 @@ jobs:
             echo "## The delta: patches in \`patches/series\` at this tag"
             echo
             applied=0
-            while IFS= read -r patch_file; do
-              case "$patch_file" in ''|'#'*) continue ;; esac
+            while IFS= read -r patch_path; do
+              case "$patch_path" in ''|'#'*) continue ;; esac
               applied=$((applied + 1))
+              # The notes show the path from the series; the
+              # description lookup in patches/README.md is by file name.
+              patch_file="$(basename "$patch_path")"
               what="$(awk -F'|' -v f="\`$patch_file\`" '$2 ~ f { gsub(/^ +| +$/, "", $3); print $3; exit }' patches/README.md)"
               if [ -n "$what" ]; then
-                echo "- \`$patch_file\` — $what"
+                echo "- \`$patch_path\` — $what"
               else
-                echo "- \`$patch_file\`"
+                echo "- \`$patch_path\`"
               fi
             done < patches/series
             if [ "$applied" -eq 0 ]; then

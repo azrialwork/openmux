@@ -1,3 +1,3 @@
 # Patch files carry the exact bytes of the changes they delete or create,
 # including CRLF line endings inside hunks. Never normalize them.
-patches/*.patch -text
+patches/**/*.patch -text

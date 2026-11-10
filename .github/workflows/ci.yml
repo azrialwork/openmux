@@ -1,12 +1,17 @@
 name: ci
 
 # CI for the delta repository itself:
-#  1. validate — upstream.json is valid, scripts parse, and every
-#     patch in patches/series applies cleanly onto the pinned
-#     upstream baseline.
-#  2. build — the full build, done here in GitHub Actions (never on
-#     a local machine for a release): baseline + patches, built with
-#     scripts/build.sh, smoke-tested, uploaded as an artifact.
+#  1. validate — upstream.json is valid, every script parses, and
+#     every patch in patches/series applies cleanly onto the pinned
+#     upstream baseline (via scripts/apply-patches.sh, the one apply
+#     implementation everything uses).
+#  2. build / build-android — the full builds, done here in GitHub
+#     Actions (never on a local machine for a release): baseline +
+#     patches, built with scripts/build.sh, smoke-tested, uploaded
+#     as artifacts.
+#
+# Shared setup lives in composite actions under .github/actions/ so
+# CI and the release workflow can never drift apart.
 
 on:
   push:
@@ -31,21 +36,10 @@ jobs:
       - name: Validate upstream.json and scripts
         run: |
           jq -e '.upstream_url and .baseline_tag and .baseline_commit' upstream.json
-          for script in scripts/*.sh; do bash -n "$script"; done
+          for script in scripts/*.sh scripts/lib/*.sh install.sh; do bash -n "$script"; done
 
       - name: Check patches apply onto the pinned baseline
-        run: |
-          baseline="$(jq -r .baseline_tag upstream.json)"
-          git clone --depth 1 --branch "$baseline" "$(jq -r .upstream_url upstream.json)" work/src
-          count=0
-          while IFS= read -r patch_file; do
-            case "$patch_file" in ''|'#'*) continue ;; esac
-            echo "Checking patches/$patch_file"
-            git -C work/src apply --check "$GITHUB_WORKSPACE/patches/$patch_file"
-            git -C work/src apply --index "$GITHUB_WORKSPACE/patches/$patch_file"
-            count=$((count + 1))
-          done < patches/series
-          echo "Checked $count patch(es) against $baseline"
+        run: scripts/apply-patches.sh work/src
 
   build:
     needs: validate
@@ -54,15 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.4"
+      - uses: ./.github/actions/setup-runtime
 
       - name: Build openmux (linux-x64)
         run: scripts/build.sh linux-x64 build/out
@@ -77,39 +63,18 @@ jobs:
 
   build-android:
     needs: validate
-    # The android target cross-compiles; it runs on the x64 image because
-    # the Android NDK's host tools are x86_64 binaries (and that image
-    # preinstalls the NDK). Nothing in the android build executes the
-    # produced binary on the host.
+    # Cross-compiled on the x64 image: the Android NDK's host tools
+    # are x86_64 binaries, and that image preinstalls the NDK.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
+      - uses: ./.github/actions/setup-runtime
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-android
         with:
-          bun-version: "1.4.4"
-
-      - name: Set up Android build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y patchelf
-          # GitHub images preinstall the Android NDK; make its location
-          # explicit for packages/cli/script/build.ts. GH_TOKEN lets the
-          # build fetch the pinned Bun android runtime without hitting
-          # the unauthenticated GitHub API rate limit.
-          if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-            ndk="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/"* 2>/dev/null | sort -V | tail -n 1)"
-            test -n "$ndk"
-            echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
-          fi
-          echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
+          token: ${{ github.token }}
 
       - name: Build openmux (linux-arm64-android)
         run: scripts/build.sh linux-arm64-android build/out

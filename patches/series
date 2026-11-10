@@ -1,10 +1,16 @@
-# Patch files in apply order, one filename per line.
+# Patch files in apply order, one path per line, relative to patches/.
 # Lines starting with # and blank lines are ignored.
-# Example:
-# 0001-short-description.patch
-0001-remove-hosted-services-and-infra.patch
-0002-remove-web-gui-and-gui-packages.patch
-0003-remove-desktop-docs-sdk-and-other-envs.patch
-0004-remove-all-references-to-deleted-envs.patch
-0005-keep-only-opencode-free-models-and-custom-providers.patch
-0010-add-termux-bionic-native-build.patch
+#
+# Patches are grouped by decision, one directory per logical change:
+#   01-cli-tui-only/         patches 0001-0004 (split for the 100 MB limit)
+#   02-providers-and-models/ patch 0005
+#   03-termux-bionic/        patch 0006
+# Numbering is dense and global: files are numbered 0001, 0002, ... in
+# apply order across all groups, with no gaps. A new patch takes the
+# next free number. See README.md in this directory for the rules.
+01-cli-tui-only/0001-remove-hosted-services-and-infra.patch
+01-cli-tui-only/0002-remove-web-gui-and-gui-packages.patch
+01-cli-tui-only/0003-remove-desktop-docs-sdk-and-other-envs.patch
+01-cli-tui-only/0004-remove-all-references-to-deleted-envs.patch
+02-providers-and-models/0005-keep-only-opencode-free-models-and-custom-providers.patch
+03-termux-bionic/0006-add-termux-bionic-native-build.patch

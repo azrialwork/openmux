@@ -1,0 +1,14 @@
+name: Set up runtime
+description: Install the Node and Bun versions every openmux build uses (single source for both, so CI and release builds can never drift apart).
+runs:
+  using: composite
+  steps:
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "24"
+
+    - name: Set up Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: "1.4.4"

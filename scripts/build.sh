@@ -19,6 +19,9 @@
 # script, and so can a local machine. No other build path exists.
 set -euo pipefail
 
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+
 if [ $# -ne 2 ]; then
   echo "Usage: $0 <target> <output-dir>" >&2
   exit 1
@@ -26,12 +29,11 @@ fi
 
 target="$1"
 output_dir="$(mkdir -p "$2" && cd "$2" && pwd)"
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
 # 1. Upstream baseline + delta.
-"$repo_root/scripts/apply-patches.sh" "$work_dir/src"
+"$OPENMUX_ROOT/scripts/apply-patches.sh" "$work_dir/src"
 
 # 2. Dependencies (frozen, exactly as upstream pinned them).
 cd "$work_dir/src"
@@ -46,7 +48,7 @@ bun install --frozen-lockfile
 #    upstream build script falls back to a synthetic
 #    0.0.0-detached-<build> version because the build checkout is a
 #    detached clone.
-version="$(jq -r .baseline_tag "$repo_root/upstream.json" | sed 's/^v//')"
+version="$(upstream_get baseline_tag | sed 's/^v//')"
 cd "$work_dir/src/packages/cli"
 if [ "$target" = "linux-arm64-android" ]; then
   # Pin the official Bun android runtime: build.ts downloads it from the
@@ -59,24 +61,21 @@ OPENCODE_TARGET="$target" OPENCODE_VERSION="$version" bun run script/build.ts
 # 4. Smoke test the produced binary, then package it.
 binary="$work_dir/src/packages/cli/dist/cli-$target/bin/opencode"
 if [ ! -f "$binary" ]; then
-  echo "ERROR: expected binary not found at $binary" >&2
   find "$work_dir/src/packages/cli/dist" -maxdepth 3 -type f | head -n 50 >&2
-  exit 1
+  die "expected binary not found at $binary"
 fi
 chmod +x "$binary"
 if [ "$target" = "linux-arm64-android" ]; then
   # A Bionic binary cannot execute on the glibc build host; verify its
   # ELF interpreter instead of running the smoke test.
-  readelf -l "$binary" | grep -Fq "interpreter: /system/bin/linker64" || {
-    echo "ERROR: $binary is not a Bionic (android) binary" >&2
-    exit 1
-  }
+  readelf -l "$binary" | grep -Fq "interpreter: /system/bin/linker64" ||
+    die "$binary is not a Bionic (android) binary"
   echo "android binary verified: ELF interpreter /system/bin/linker64"
 else
   "$binary" --version
 fi
 
-baseline="$(jq -r .baseline_tag "$repo_root/upstream.json")"
+baseline="$(upstream_get baseline_tag)"
 archive="openmux-$baseline-$target.tar.gz"
 tar -czf "$output_dir/$archive" -C "$(dirname "$binary")" "$(basename "$binary")"
 (cd "$output_dir" && sha256sum "$archive" > "$archive.sha256")
