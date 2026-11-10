@@ -42,7 +42,9 @@ jobs:
           - target: linux-arm64
             runner: ubuntu-24.04-arm
           - target: linux-arm64-android
-            runner: ubuntu-24.04-arm
+            # Cross-compiled from x64: the Android NDK's host tools are
+            # x86_64 binaries, and the x64 image preinstalls the NDK.
+            runner: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

@@ -77,7 +77,11 @@ jobs:
 
   build-android:
     needs: validate
-    runs-on: ubuntu-24.04-arm
+    # The android target cross-compiles; it runs on the x64 image because
+    # the Android NDK's host tools are x86_64 binaries (and that image
+    # preinstalls the NDK). Nothing in the android build executes the
+    # produced binary on the host.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
