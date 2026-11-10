@@ -41,6 +41,8 @@ jobs:
             runner: ubuntu-24.04
           - target: linux-arm64
             runner: ubuntu-24.04-arm
+          - target: linux-arm64-android
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +55,22 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
+
+      - name: Set up Android build tools
+        if: matrix.target == 'linux-arm64-android'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf
+          # GitHub images preinstall the Android NDK; make its location
+          # explicit for packages/cli/script/build.ts. GH_TOKEN lets the
+          # build fetch the pinned Bun android runtime without hitting
+          # the unauthenticated GitHub API rate limit.
+          if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+            ndk="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/"* 2>/dev/null | sort -V | tail -n 1)"
+            test -n "$ndk"
+            echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          fi
+          echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
 
       - name: Build openmux (${{ matrix.target }})
         run: scripts/build.sh "${{ matrix.target }}" build/out

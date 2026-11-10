@@ -1,0 +1,815 @@
+From a3e7fedc59027ea1879c121813217d63261ed911 Mon Sep 17 00:00:00 2001
+From: azrialwork <azrial.work@gmail.com>
+Date: Tue, 10 Nov 2026 20:17:17 +0700
+Subject: [PATCH] feat(cli): add native android (Termux/Bionic) build target
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+New target linux-arm64-android compiles against Bun's official android runtime, producing a PIE binary for /system/bin/linker64. The parcel-watcher and PTY bindings use their designed fallbacks (no android builds exist upstream).
+
+OpenTUI publishes no android asset, so the build embeds a prepared asset tree: the linux-arm64-musl render library — which needs only libc.so, Bionic's own SONAME — plus a small compat shim (script/bionic-compat.c) covering the three symbols Bionic lacks and disabling heap pointer tagging, which Bun's FFI cannot represent. patchelf adds libm.so and the shim as NEEDED entries with an $ORIGIN rpath. A build-time audit fails if the render library's imports drift from script/opentui-musl-undefined.txt. At startup the CLI extracts the tree to its cache and re-execs once with OTUI_ASSET_ROOT set (the renderer reads an environment fixed at process start). A patchedDependencies entry maps @opentui/core's asset descriptor for android to the musl asset.
+---
+ bun.lock                                      |   7 +-
+ package.json                                  |   3 +-
+ packages/cli/script/bionic-compat.c           |  66 +++++
+ packages/cli/script/build.ts                  | 211 +++++++++++++++-
+ packages/cli/script/opencode-pty.ts           |   6 +-
+ .../cli/script/opentui-musl-undefined.txt     | 226 ++++++++++++++++++
+ packages/cli/src/android-opentui.ts           |  43 ++++
+ packages/cli/src/index.ts                     |   6 +
+ packages/cli/src/opentui-android-assets.ts    |   6 +
+ patches/@opentui%2Fcore@0.8.1.patch           |  51 ++++
+ 10 files changed, 615 insertions(+), 10 deletions(-)
+ create mode 100644 packages/cli/script/bionic-compat.c
+ create mode 100644 packages/cli/script/opentui-musl-undefined.txt
+ create mode 100644 packages/cli/src/android-opentui.ts
+ create mode 100644 packages/cli/src/opentui-android-assets.ts
+ create mode 100644 patches/@opentui%2Fcore@0.8.1.patch
+
+diff --git a/bun.lock b/bun.lock
+index 748c5e5..f90a22c 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -518,13 +518,14 @@
+     "esbuild",
+   ],
+   "patchedDependencies": {
+-    "solid-js@1.9.17": "patches/solid-js@1.9.17.patch",
+     "@ai-sdk/openai-compatible@2.0.41": "patches/@ai-sdk%2Fopenai-compatible@2.0.41.patch",
+-    "@modelcontextprotocol/client@2.3.1": "patches/@modelcontextprotocol%2Fclient@2.3.1.patch",
+-    "@ff-labs/fff-bun@0.10.5": "patches/@ff-labs%2Ffff-bun@0.10.5.patch",
+     "pacote@21.5.1": "patches/pacote@21.5.1.patch",
+     "@npmcli/agent@4.0.2": "patches/@npmcli%2Fagent@4.0.2.patch",
+     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
++    "@modelcontextprotocol/client@2.3.1": "patches/@modelcontextprotocol%2Fclient@2.3.1.patch",
++    "@opentui/core@0.8.1": "patches/@opentui%2Fcore@0.8.1.patch",
++    "@ff-labs/fff-bun@0.10.5": "patches/@ff-labs%2Ffff-bun@0.10.5.patch",
++    "solid-js@1.9.17": "patches/solid-js@1.9.17.patch",
+   },
+   "overrides": {
+     "@effect/platform-node-shared": "catalog:",
+diff --git a/package.json b/package.json
+index 190041e..5a54332 100644
+--- a/package.json
++++ b/package.json
+@@ -131,6 +131,7 @@
+     "@ai-sdk/google@3.0.73": "patches/@ai-sdk%2Fgoogle@3.0.73.patch",
+     "@ff-labs/fff-bun@0.10.5": "patches/@ff-labs%2Ffff-bun@0.10.5.patch",
+     "vite@8.2.4": "patches/vite@8.2.4.patch",
+-    "@modelcontextprotocol/client@2.3.1": "patches/@modelcontextprotocol%2Fclient@2.3.1.patch"
++    "@modelcontextprotocol/client@2.3.1": "patches/@modelcontextprotocol%2Fclient@2.3.1.patch",
++    "@opentui/core@0.8.1": "patches/@opentui%2Fcore@0.8.1.patch"
+   }
+ }
+diff --git a/packages/cli/script/bionic-compat.c b/packages/cli/script/bionic-compat.c
+new file mode 100644
+index 0000000..8464ffd
+--- /dev/null
++++ b/packages/cli/script/bionic-compat.c
+@@ -0,0 +1,66 @@
++// Bionic compatibility shim for the musl build of libopentui.so.
++//
++// The musl variant of OpenTUI's native library needs only `libc.so` — the
++// same SONAME as Bionic's C library — but three of its imported symbols are
++// not provided by Bionic (verified by a full undefined-symbol diff against
++// the device's libc.so + libm.so + libdl.so):
++//
++//   __errno_location   — called (11 sites). Bionic's accessor is __errno().
++//   copy_file_range    — imported but never called in @opentui/core 0.8.1
++//                        (zero call sites in all executable sections);
++//                        implemented properly via the raw syscall anyway
++//                        (Bionic only wraps it from API 34).
++//   pthread_tryjoin_np — imported but never called in @opentui/core 0.8.1
++//                        (zero call sites); Bionic has no equivalent, so
++//                        this returns EBUSY ("thread has not exited").
++//
++// libm functions (sinh, …) are covered by adding libm.so as a NEEDED entry
++// of the patched libopentui.so at build time (patchelf), not by this shim.
++
++#include <errno.h>
++#include <malloc.h>
++#include <pthread.h>
++#include <stddef.h>
++#include <sys/syscall.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++// Termux's <malloc.h> omits the mallopt declaration; Bionic libc exports it.
++int mallopt(int param, int value);
++
++#ifndef M_BIONIC_SET_HEAP_TAGGING_LEVEL
++#define M_BIONIC_SET_HEAP_TAGGING_LEVEL (-204)
++#endif
++#ifndef M_HEAP_TAGGING_LEVEL_NONE
++#define M_HEAP_TAGGING_LEVEL_NONE 0
++#endif
++
++// Bionic's scudo allocator tags heap pointers (top byte 0xB4) in app
++// processes. Hardware ignores the tag (TBI), but a tagged pointer exceeds
++// JavaScript's safe-integer range, and Bun's FFI refuses to hand it to JS —
++// which aborts OpenTUI renderer creation ("Pointer exceeds safe integer
++// range"). This shim is loaded as a dependency of libopentui.so, so its
++// constructor runs before the renderer allocates anything: turn tagging off
++// for the process.
++__attribute__((constructor)) static void openmux_bionic_compat_init(void) {
++  mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL, M_HEAP_TAGGING_LEVEL_NONE);
++}
++
++#ifndef __NR_copy_file_range
++#define __NR_copy_file_range 326 // aarch64
++#endif
++
++int *__errno_location(void) {
++  return __errno();
++}
++
++ssize_t copy_file_range(int fd_in, off64_t *off_in, int fd_out, off64_t *off_out, size_t len,
++                        unsigned int flags) {
++  return (ssize_t)syscall(__NR_copy_file_range, fd_in, off_in, fd_out, off_out, len, flags);
++}
++
++int pthread_tryjoin_np(pthread_t thread, void **retval) {
++  (void)thread;
++  (void)retval;
++  return EBUSY;
++}
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index a39eb4b..b8d6baa 100755
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -1,8 +1,11 @@
+ #!/usr/bin/env bun
+ 
+ import { $ } from "bun"
++import { spawnSync } from "node:child_process"
+ import { createHash } from "node:crypto"
+-import { mkdir, rm } from "fs/promises"
++import { copyFile, cp, mkdir, readFile, rm } from "fs/promises"
++import { existsSync } from "node:fs"
++import { createRequire } from "node:module"
+ import path from "path"
+ import { Script } from "@opencode/script"
+ import { embed } from "@opencode/script/highlights"
+@@ -38,13 +41,14 @@ const modelsSnapshot = modelsSnapshotPlugin(await bundledModelsSnapshot())
+ const allTargets: {
+   os: string
+   arch: "arm64" | "x64"
+-  abi?: "musl"
++  abi?: "musl" | "android"
+   avx2?: false
+ }[] = [
+   { os: "linux", arch: "arm64" },
+   { os: "linux", arch: "x64" },
+   { os: "linux", arch: "x64", avx2: false },
+   { os: "linux", arch: "arm64", abi: "musl" },
++  { os: "linux", arch: "arm64", abi: "android" },
+   { os: "linux", arch: "x64", abi: "musl" },
+   { os: "linux", arch: "x64", abi: "musl", avx2: false },
+   { os: "darwin", arch: "arm64" },
+@@ -70,6 +74,10 @@ if (!targets.length) throw new Error(`Unknown build target: ${requestedTarget}`)
+ // Bun 1.4.4 skips native packages for the other libc by default, but the musl targets need them.
+ if (!skipInstall)
+   await $`bun install --os="*" --cpu="*" --libc="*" @opentui/core@${pkg.dependencies["@opentui/core"]} @opencode/pty@${pkg.dependencies["@opencode/pty"]}`
++// The android target has no published OpenTUI native asset; its build embeds a
++// prepared asset tree (musl render library + Bionic compat shim) instead. See
++// prepareOpentuiAndroidAssets below.
++const androidAssets = targets.some((item) => item.abi === "android") ? await prepareOpentuiAndroidAssets() : undefined
+ const pluginRuntimeEntries = discoverPluginRuntimeSpecifiers()
+ const pluginRuntimeModulesSource = [
+   "export const resolveHostPackageRoots = () => []",
+@@ -125,6 +133,19 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       }))
+     },
+   }
++  const opentuiAndroidAssetsPlugin: BunPlugin = {
++    name: "opentui-android-assets",
++    setup(build) {
++      build.onLoad({ filter: /opentui-android-assets\.ts$/ }, () => ({
++        loader: "js",
++        contents:
++          item.abi === "android" && androidAssets
++            ? `import file from ${JSON.stringify(androidAssets.path)} with { type: "file" }
++export default { path: file, sha256: ${JSON.stringify(androidAssets.sha256)} }`
++            : "export default undefined",
++      }))
++    },
++  }
+   const simulationInputs = new Set<string>()
+   const simulationGraphPlugin: BunPlugin = {
+     name: "opencode-simulation-graph",
+@@ -140,7 +161,12 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+     name: "parcel-watcher-binding",
+     setup(build) {
+       build.onLoad({ filter: /filesystem[/\\]watcher-binding\.ts$/ }, () => ({
+-        contents: `export default () => require(${JSON.stringify(parcelWatcherPackage)})`,
++        // @parcel/watcher publishes no android build; filesystem/watcher.ts
++        // catches the throw and falls back to fs.watch.
++        contents:
++          item.abi === "android"
++            ? `export default () => { throw new Error("@parcel/watcher has no android build") }`
++            : `export default () => require(${JSON.stringify(parcelWatcherPackage)})`,
+         loader: "js",
+       }))
+     },
+@@ -156,6 +182,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       solidPlugin,
+       parcelWatcherPlugin,
+       opencodePtyPlugin,
++      opentuiAndroidAssetsPlugin,
+       pluginRuntimePlugin,
+       wsReexportPlugin,
+       simulationGraphPlugin,
+@@ -191,8 +218,10 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       OPENCODE_ARTIFACT: `'cli'`,
+       ...(highlights ? { OPENCODE_RELEASE_HIGHLIGHTS: JSON.stringify(highlights) } : {}),
+       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
+-      // FFF_LIBC selects the fff native lib variant: "musl" or "gnu".
+-      FFF_LIBC: item.os === "linux" ? `'${item.abi ?? "gnu"}'` : "undefined",
++      // FFF_LIBC selects the fff native lib variant: "musl" or "gnu". On
++      // android fff-bun ignores it and loads its native android package by
++      // platform; "musl" is reported for the declared type.
++      FFF_LIBC: item.os === "linux" ? `'${item.abi === "android" ? "musl" : (item.abi ?? "gnu")}'` : "undefined",
+       ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
+     },
+   })
+@@ -311,6 +340,178 @@ function compileReleaseAssets(release: string) {
+   return pending
+ }
+ 
++// Prepares the OpenTUI asset tree embedded in android builds. OpenTUI
++// publishes no android asset, but its linux-arm64-musl render library needs
++// only `libc.so` — Bionic's own SONAME — and runs on Android once three gaps
++// are bridged: libm as a separate NEEDED entry, a small compat shim for the
++// symbols Bionic lacks (script/bionic-compat.c), and OTUI_ASSET_ROOT serving
++// the tree from real files at runtime (src/android-opentui.ts). The symbol
++// audit below fails the build if a future @opentui/core changes the render
++// library's imports, so the bridge is re-verified instead of silently stale.
++async function prepareOpentuiAndroidAssets() {
++  const stage = path.join(outdir, ".android-opentui")
++  const tree = path.join(stage, "assets")
++  await rm(stage, { recursive: true, force: true })
++  const cliRequire = createRequire(path.join(dir, "package.json"))
++  const coreDir = path.dirname(cliRequire.resolve("@opentui/core/package.json"))
++  const coreRequire = createRequire(path.join(coreDir, "package.json"))
++  const muslDir = path.dirname(coreRequire.resolve("@opentui/core-linux-arm64-musl"))
++  const wasmDir = path.dirname(coreRequire.resolve("web-tree-sitter/package.json"))
++  const libDir = path.join(tree, "@opentui/core-linux-arm64-musl")
++  await mkdir(libDir, { recursive: true })
++  await mkdir(path.join(tree, "@opentui/core"), { recursive: true })
++  await mkdir(path.join(tree, "web-tree-sitter"), { recursive: true })
++  await copyFile(path.join(muslDir, "libopentui.so"), path.join(libDir, "libopentui.so"))
++  await copyFile(path.join(coreDir, "parser.worker.js"), path.join(tree, "@opentui/core", "parser.worker.js"))
++  await cp(path.join(coreDir, "assets"), path.join(tree, "@opentui/core", "assets"), { recursive: true })
++  await copyFile(path.join(wasmDir, "tree-sitter.wasm"), path.join(tree, "web-tree-sitter", "tree-sitter.wasm"))
++  const shim = await bionicCompatLibrary(stage)
++  await copyFile(shim, path.join(libDir, "libopentui-android-compat.so"))
++  await auditBionicCompat(
++    new Uint8Array(await readFile(path.join(muslDir, "libopentui.so"))),
++    new Uint8Array(await readFile(shim)),
++  )
++  const patchelf = toolPath(
++    "OPENCODE_PATCHELF",
++    "patchelf",
++    "It rewrites the staged render library's NEEDED entries for Bionic.",
++  )
++  run(patchelf, [
++    "--add-needed",
++    "libm.so",
++    "--add-needed",
++    "libopentui-android-compat.so",
++    "--set-rpath",
++    "$ORIGIN",
++    path.join(libDir, "libopentui.so"),
++  ])
++  const archive = path.join(stage, "opentui-assets.tar")
++  run("tar", ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "--mtime=@0", "-cf", archive, "-C", tree, "."])
++  return { path: archive, sha256: createHash("sha256").update(await readFile(archive)).digest("hex") }
++}
++
++async function bionicCompatLibrary(stage: string) {
++  const out = path.join(stage, "libopentui-android-compat.so")
++  const prebuilt = process.env.OPENCODE_BIONIC_SHIM
++  if (prebuilt) {
++    await copyFile(prebuilt, out)
++    return out
++  }
++  const cc = androidCompiler()
++  if (!cc)
++    throw new Error(
++      "The android target needs an aarch64-linux-android C compiler for script/bionic-compat.c: " +
++        "set OPENCODE_ANDROID_CC, or ANDROID_NDK_HOME, or provide a prebuilt library via OPENCODE_BIONIC_SHIM.",
++    )
++  run(cc[0], [
++    ...cc.slice(1),
++    path.join(dir, "script", "bionic-compat.c"),
++    "-shared",
++    "-fPIC",
++    "-O2",
++    "-Wl,-soname,libopentui-android-compat.so",
++    "-o",
++    out,
++  ])
++  return out
++}
++
++function androidCompiler() {
++  if (process.env.OPENCODE_ANDROID_CC) return process.env.OPENCODE_ANDROID_CC.split(/\s+/).filter(Boolean)
++  for (const home of [process.env.ANDROID_NDK_HOME, process.env.ANDROID_NDK_ROOT]) {
++    if (!home) continue
++    for (const host of ["linux-x86_64", "darwin-x86_64", "darwin-arm64", "windows-x86_64"]) {
++      const candidate = path.join(home, "toolchains", "llvm", "prebuilt", host, "bin", "aarch64-linux-android31-clang")
++      if (existsSync(candidate)) return [candidate]
++    }
++  }
++  if (onPath("aarch64-linux-android31-clang")) return ["aarch64-linux-android31-clang"]
++  return undefined
++}
++
++function toolPath(env: string, name: string, hint: string) {
++  const configured = process.env[env]
++  if (configured) return configured
++  if (onPath(name)) return name
++  throw new Error(`The android target needs ${name}: set ${env} to its path or put it on PATH. ${hint}`)
++}
++
++function onPath(name: string) {
++  return (process.env.PATH ?? "").split(path.delimiter).some((entry) => entry !== "" && existsSync(path.join(entry, name)))
++}
++
++function run(command: string, args: string[]) {
++  const result = spawnSync(command, args, { stdio: "inherit" })
++  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`)
++}
++
++async function auditBionicCompat(lib: Uint8Array, shim: Uint8Array) {
++  const expected = new Set(
++    (await readFile(path.join(dir, "script", "opentui-musl-undefined.txt"), "utf8"))
++      .split("\n")
++      .map((line) => line.trim())
++      .filter((line) => line !== "" && !line.startsWith("#")),
++  )
++  const { undefinedSymbols } = dynamicSymbols(lib)
++  const drift = [
++    ...[...undefinedSymbols].filter((name) => !expected.has(name)).map((name) => `new import ${name}`),
++    ...[...expected].filter((name) => !undefinedSymbols.has(name)).map((name) => `missing import ${name}`),
++  ]
++  if (drift.length > 0)
++    throw new Error(
++      `libopentui.so imports drifted from script/opentui-musl-undefined.txt (${drift.join(", ")}). ` +
++        "Re-run the Bionic symbol audit, extend script/bionic-compat.c if the gap grew, and regenerate the list.",
++    )
++  const { definedSymbols } = dynamicSymbols(shim)
++  for (const name of ["__errno_location", "copy_file_range", "pthread_tryjoin_np"]) {
++    if (!undefinedSymbols.has(name))
++      throw new Error(`libopentui.so no longer imports ${name}; re-audit script/bionic-compat.c`)
++    if (!definedSymbols.has(name)) throw new Error(`script/bionic-compat.c does not export ${name}`)
++  }
++}
++
++// Minimal ELF64 little-endian dynamic-symbol reader for the audit above.
++function dynamicSymbols(bytes: Uint8Array) {
++  if (bytes.length < 64 || bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46)
++    throw new Error("not an ELF file")
++  if (bytes[4] !== 2 || bytes[5] !== 1) throw new Error("expected a 64-bit little-endian ELF")
++  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
++  const sectionOffset = Number(view.getBigUint64(0x28, true))
++  const sectionSize = view.getUint16(0x3a, true)
++  const sectionCount = view.getUint16(0x3c, true)
++  const sections: { type: number; offset: number; size: number; link: number; entrySize: number }[] = []
++  for (let i = 0; i < sectionCount; i++) {
++    const at = sectionOffset + i * sectionSize
++    sections.push({
++      type: view.getUint32(at + 4, true),
++      offset: Number(view.getBigUint64(at + 24, true)),
++      size: Number(view.getBigUint64(at + 32, true)),
++      link: view.getUint32(at + 40, true),
++      entrySize: Number(view.getBigUint64(at + 56, true)),
++    })
++  }
++  const dynsym = sections.find((section) => section.type === 11)
++  if (!dynsym) throw new Error("ELF has no dynamic symbol table")
++  const strings = sections[dynsym.link]
++  if (!strings) throw new Error("ELF dynamic symbol table has no string table")
++  const readString = (offset: number) => {
++    const start = strings.offset + offset
++    let end = start
++    while (bytes[end] !== 0) end++
++    return new TextDecoder().decode(bytes.subarray(start, end))
++  }
++  const undefinedSymbols = new Set<string>()
++  const definedSymbols = new Set<string>()
++  const entrySize = dynsym.entrySize || 24
++  for (let at = dynsym.offset; at + entrySize <= dynsym.offset + dynsym.size; at += entrySize) {
++    const name = readString(view.getUint32(at, true))
++    if (!name) continue
++    if (view.getUint16(at + 6, true) === 0) undefinedSymbols.add(name)
++    else definedSymbols.add(name)
++  }
++  return { undefinedSymbols, definedSymbols }
++}
++
+ function targetName(item: (typeof allTargets)[number]) {
+   return [
+     binary,
+diff --git a/packages/cli/script/opencode-pty.ts b/packages/cli/script/opencode-pty.ts
+index a40070c..aad230b 100644
+--- a/packages/cli/script/opencode-pty.ts
++++ b/packages/cli/script/opencode-pty.ts
+@@ -12,7 +12,7 @@ export type OpencodePtyAsset = {
+ type Target = {
+   readonly platform: string
+   readonly arch: string
+-  readonly libc?: "glibc" | "musl"
++  readonly libc?: "glibc" | "musl" | "android"
+ }
+ 
+ const core = createRequire(path.resolve(import.meta.dirname, "../../core/package.json"))
+@@ -21,6 +21,10 @@ const pty = createRequire(core.resolve("@opencode/pty/package.json"))
+ export async function resolveOpencodePty(target: Target): Promise<OpencodePtyAsset | undefined> {
+   if (target.platform !== "darwin" && target.platform !== "linux" && target.platform !== "win32") return undefined
+   if (target.arch !== "arm64" && target.arch !== "x64") return undefined
++  // No PTY binary is published for other libcs (android/Bionic); the binding
++  // falls back to undefined and shells run without a PTY.
++  if (target.platform === "linux" && target.libc !== undefined && target.libc !== "glibc" && target.libc !== "musl")
++    return undefined
+ 
+   const suffix = [target.platform, target.arch, target.platform === "linux" ? (target.libc ?? "glibc") : undefined]
+     .filter(Boolean)
+diff --git a/packages/cli/script/opentui-musl-undefined.txt b/packages/cli/script/opentui-musl-undefined.txt
+new file mode 100644
+index 0000000..b32ec0c
+--- /dev/null
++++ b/packages/cli/script/opentui-musl-undefined.txt
+@@ -0,0 +1,226 @@
++# Undefined dynamic symbols of @opentui/core-linux-arm64-musl's libopentui.so
++# (@opentui/core 0.8.1, pinned by packages/cli/package.json). The android build
++# (patch 0010) fails if this set drifts: re-run the Bionic symbol audit against a
++# device's libc.so/libm.so/libdl.so, extend script/bionic-compat.c for any new gap,
++# and regenerate this file. The audited Bionic gap is exactly: __errno_location,
++# copy_file_range, pthread_tryjoin_np (all provided by the compat shim).
++__errno_location
++__fpclassify
++__fpclassifyf
++__sched_cpucount
++_exit
++abort
++accept4
++access
++acos
++aligned_alloc
++asin
++atan
++atan2
++atan2f
++atanf
++atoi
++bind
++bsearch
++calloc
++cbrt
++cbrtf
++chdir
++clock
++clock_getres
++clock_gettime
++clock_nanosleep
++close
++closedir
++connect
++copy_file_range
++cosh
++dl_iterate_phdr
++dladdr
++dlclose
++dlopen
++dlsym
++dup
++dup2
++eventfd
++execve
++faccessat
++fchdir
++fchmod
++fchmodat
++fchown
++fclose
++fcntl
++fdopen
++feof
++ferror
++fflush
++fileno
++flock
++fopen
++fork
++fprintf
++fputc
++fputs
++fread
++free
++frexp
++fseek
++fstat
++fsync
++ftell
++ftruncate
++futimens
++fwrite
++getauxval
++getcwd
++getenv
++gethostname
++getpid
++getrandom
++getsockname
++getsockopt
++gettimeofday
++gmtime
++gmtime_r
++hypot
++ioctl
++isatty
++kill
++linkat
++listen
++localtime_r
++lseek
++lstat
++madvise
++malloc
++malloc_usable_size
++memchr
++memfd_create
++mkdirat
++mktime
++mmap
++mremap
++munmap
++nanosleep
++open
++openat
++opendir
++pipe2
++poll
++posix_memalign
++pow
++powf
++prctl
++pread
++preadv
++pthread_attr_destroy
++pthread_attr_getschedparam
++pthread_attr_init
++pthread_attr_setguardsize
++pthread_attr_setinheritsched
++pthread_attr_setschedparam
++pthread_attr_setschedpolicy
++pthread_attr_setstacksize
++pthread_cond_broadcast
++pthread_cond_destroy
++pthread_cond_init
++pthread_cond_signal
++pthread_cond_wait
++pthread_create
++pthread_detach
++pthread_join
++pthread_kill
++pthread_mutex_destroy
++pthread_mutex_init
++pthread_mutex_lock
++pthread_mutex_unlock
++pthread_once
++pthread_rwlock_rdlock
++pthread_rwlock_unlock
++pthread_rwlock_wrlock
++pthread_self
++pthread_sigmask
++pthread_tryjoin_np
++pwrite
++pwritev
++qsort
++read
++readdir
++readlink
++readlinkat
++readv
++realloc
++realpath
++recvmsg
++remove
++rename
++renameat
++rmdir
++scalbn
++sched_get_priority_max
++sched_get_priority_min
++sched_getaffinity
++sched_getscheduler
++sendfile
++sendmmsg
++sendmsg
++setpgid
++setregid
++setreuid
++setsockopt
++setvbuf
++shutdown
++sigaction
++sigaddset
++sigaltstack
++sigdelset
++sigemptyset
++sigfillset
++sigismember
++sigpending
++sigprocmask
++sigtimedwait
++sinh
++snprintf
++socket
++socketpair
++sscanf
++statx
++stderr
++strcasecmp
++strchr
++strcmp
++strcpy
++strcspn
++strerror_r
++strftime
++strncmp
++strncpy
++strrchr
++strspn
++strstr
++strtod
++strtol
++strtoll
++strtoul
++strtoull
++symlinkat
++syscall
++sysconf
++tanh
++tcflush
++time
++toupper
++uname
++unlink
++unlinkat
++utimensat
++vfprintf
++vprintf
++vsnprintf
++wait4
++wcslen
++wcsrtombs
++write
++writev
+diff --git a/packages/cli/src/android-opentui.ts b/packages/cli/src/android-opentui.ts
+new file mode 100644
+index 0000000..2af656d
+--- /dev/null
++++ b/packages/cli/src/android-opentui.ts
+@@ -0,0 +1,43 @@
++import { Path } from "@opencode/util/global"
++import { mkdir, rename, rm, writeFile } from "node:fs/promises"
++import path from "node:path"
++import assets from "./opentui-android-assets"
++
++// OpenTUI publishes no android native asset, so android builds of the CLI
++// embed a prepared asset tree instead: the linux musl render library made
++// Bionic-compatible at build time (script/build.ts), plus the parser assets.
++// Extract it once and hand the CLI a real OTUI_ASSET_ROOT: the renderer
++// reads the variable from an environment fixed at process start, so setting
++// process.env here would not reach it — re-exec the CLI once with the
++// variable in its environment. The re-exec'd process sees the variable set
++// and proceeds normally.
++export async function ensureOpentuiAssetRoot() {
++  if (process.platform !== "android" || process.env.OTUI_ASSET_ROOT || !assets) return
++  const root = path.join(Path.cache, "opentui-assets", assets.sha256.slice(0, 16))
++  if (!(await Bun.file(path.join(root, ".complete")).exists())) {
++    const staging = `${root}.tmp-${process.pid}`
++    await rm(staging, { recursive: true, force: true })
++    await mkdir(staging, { recursive: true })
++    const archive = new Bun.Archive(await Bun.file(assets.path).arrayBuffer())
++    for (const [name, blob] of await archive.files()) {
++      const relative = name.replace(/^\.\//, "")
++      if (!relative || relative.endsWith("/")) continue
++      const destination = path.join(staging, relative)
++      if (!destination.startsWith(staging + path.sep)) continue
++      await mkdir(path.dirname(destination), { recursive: true })
++      await writeFile(destination, new Uint8Array(await blob.arrayBuffer()))
++    }
++    await writeFile(path.join(staging, ".complete"), "")
++    await rm(root, { recursive: true, force: true })
++    await rename(staging, root)
++  }
++  // In a compiled binary process.argv is ["bun", "/$bunfs/root/<entry>",
++  // ...user args]; the CLI's own arguments start at index 2.
++  const result = Bun.spawnSync([process.execPath, ...process.argv.slice(2)], {
++    env: { ...process.env, OTUI_ASSET_ROOT: root },
++    stdin: "inherit",
++    stdout: "inherit",
++    stderr: "inherit",
++  })
++  process.exit(result.exitCode ?? 1)
++}
+diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
+index 7bd7af6..7be0cfc 100755
+--- a/packages/cli/src/index.ts
++++ b/packages/cli/src/index.ts
+@@ -18,6 +18,7 @@ import { EffectFlock } from "@opencode/util/effect-flock"
+ import { Heap } from "./heap"
+ import { CpuProfile } from "./cpu-profile"
+ import { ShutdownDeadline } from "./shutdown-deadline"
++import { ensureOpentuiAssetRoot } from "./android-opentui"
+ 
+ // Keep requests to the local service off any proxy. Bun reads lowercase `no_proxy` alone whenever it is set, so both
+ // spellings get the same merged list.
+@@ -34,6 +35,11 @@ process.env.no_proxy = noProxy
+ 
+ ensurePluginRuntime()
+ 
++// Android only: extract the embedded OpenTUI asset tree and re-exec with
++// OTUI_ASSET_ROOT set, before any command can create a renderer. No-op
++// elsewhere (and in the re-exec'd process, which inherits the variable).
++await ensureOpentuiAssetRoot()
++
+ if (process.env.OPENCODE_SSH_ASKPASS_PORT) {
+   const { askpass } = await import("./ssh-askpass")
+   process.exit(await Effect.runPromise(askpass.pipe(Effect.provide(NodeServices.layer))))
+diff --git a/packages/cli/src/opentui-android-assets.ts b/packages/cli/src/opentui-android-assets.ts
+new file mode 100644
+index 0000000..623fb84
+--- /dev/null
++++ b/packages/cli/src/opentui-android-assets.ts
+@@ -0,0 +1,6 @@
++// Replaced by the CLI build (script/build.ts): android builds export the
++// embedded OpenTUI asset archive prepared for Bionic; every other build —
++// and source runs — exports undefined.
++const assets: { readonly path: string; readonly sha256: string } | undefined = undefined
++
++export default assets
+diff --git a/patches/@opentui%2Fcore@0.8.1.patch b/patches/@opentui%2Fcore@0.8.1.patch
+new file mode 100644
+index 0000000..c608076
+--- /dev/null
++++ b/patches/@opentui%2Fcore@0.8.1.patch
+@@ -0,0 +1,51 @@
++diff --git a/chunk-bun-wdetc10w.js b/chunk-bun-wdetc10w.js
++index 34043918b73b03071989b2d6b5e22041188aa1cf..ae666a0a597bd08c312c94f61dcc2d33abf8733c 100644
++--- a/chunk-bun-wdetc10w.js
+++++ b/chunk-bun-wdetc10w.js
++@@ -5685,6 +5685,12 @@ var NATIVE_FILE_NAMES = {
++   win32: "opentui.dll"
++ };
++ function getNativeAssetDescriptor(target) {
+++  // Android has no published OpenTUI asset. The linux-arm64-musl build is
+++  // Bionic-compatible with a small compat shim; the host serves it through
+++  // OTUI_ASSET_ROOT.
+++  if (target.platform === "android") {
+++    target = { platform: "linux", arch: target.arch, libc: "musl" };
+++  }
++   if (!Object.hasOwn(NATIVE_FILE_NAMES, target.platform) || target.arch !== "arm64" && target.arch !== "x64") {
++     throw new Error(`Unsupported OpenTUI Node asset target: ${String(target.platform)}-${String(target.arch)}`);
++   }
++diff --git a/chunk-node-m8mjyx7h.js b/chunk-node-m8mjyx7h.js
++index ccd93534a32b97eb69fffcf55408274ddb66e0a8..232a3cd248bb783a907e4b19f9efb48ccef1cd90 100644
++--- a/chunk-node-m8mjyx7h.js
+++++ b/chunk-node-m8mjyx7h.js
++@@ -5695,6 +5695,12 @@ var NATIVE_FILE_NAMES = {
++   win32: "opentui.dll"
++ };
++ function getNativeAssetDescriptor(target) {
+++  // Android has no published OpenTUI asset. The linux-arm64-musl build is
+++  // Bionic-compatible with a small compat shim; the host serves it through
+++  // OTUI_ASSET_ROOT.
+++  if (target.platform === "android") {
+++    target = { platform: "linux", arch: target.arch, libc: "musl" };
+++  }
++   if (!Object.hasOwn(NATIVE_FILE_NAMES, target.platform) || target.arch !== "arm64" && target.arch !== "x64") {
++     throw new Error(`Unsupported OpenTUI Node asset target: ${String(target.platform)}-${String(target.arch)}`);
++   }
++diff --git a/node-assets.js b/node-assets.js
++index 36294f26b6830300c4b0f4ac399b42da05764cd7..8419ba66a377c66d1123a87a95ea2f360877768c 100644
++--- a/node-assets.js
+++++ b/node-assets.js
++@@ -10,6 +10,12 @@ var NATIVE_FILE_NAMES = {
++   win32: "opentui.dll"
++ };
++ function getNativeAssetDescriptor(target) {
+++  // Android has no published OpenTUI asset. The linux-arm64-musl build is
+++  // Bionic-compatible with a small compat shim; the host serves it through
+++  // OTUI_ASSET_ROOT.
+++  if (target.platform === "android") {
+++    target = { platform: "linux", arch: target.arch, libc: "musl" };
+++  }
++   if (!Object.hasOwn(NATIVE_FILE_NAMES, target.platform) || target.arch !== "arm64" && target.arch !== "x64") {
++     throw new Error(`Unsupported OpenTUI Node asset target: ${String(target.platform)}-${String(target.arch)}`);
++   }
+-- 
+2.43.0
+

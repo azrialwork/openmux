@@ -6,11 +6,15 @@
 #   scripts/build.sh <target> <output-dir>
 #
 #   <target>      OpenCode target name, e.g. linux-x64, linux-arm64,
-#                 darwin-arm64, darwin-x64, windows-x64
+#                 linux-arm64-android, darwin-arm64, darwin-x64,
+#                 windows-x64
 #   <output-dir>  Directory that receives opencode-<target>.tar.gz
 #                 (or .zip contents on windows — not used yet)
 #
 # Requires: git, jq, bun 1.4.4 and node >= 22 on PATH.
+# The linux-arm64-android target additionally needs patchelf and an
+# aarch64-linux-android C compiler (Android NDK, or OPENCODE_ANDROID_CC /
+# OPENCODE_BIONIC_SHIM — see packages/cli/script/build.ts in upstream).
 # This is the single build entry point: GitHub Actions calls this
 # script, and so can a local machine. No other build path exists.
 set -euo pipefail
@@ -44,6 +48,12 @@ bun install --frozen-lockfile
 #    detached clone.
 version="$(jq -r .baseline_tag "$repo_root/upstream.json" | sed 's/^v//')"
 cd "$work_dir/src/packages/cli"
+if [ "$target" = "linux-arm64-android" ]; then
+  # Pin the official Bun android runtime: build.ts downloads it from the
+  # Bun release and verifies its SHA-256 (upstream's BUN_COMPILE_RELEASE
+  # path) instead of relying on the build host's Bun distribution.
+  export BUN_COMPILE_RELEASE="${BUN_COMPILE_RELEASE:-bun-v1.4.4}"
+fi
 OPENCODE_TARGET="$target" OPENCODE_VERSION="$version" bun run script/build.ts
 
 # 4. Smoke test the produced binary, then package it.
@@ -54,7 +64,17 @@ if [ ! -f "$binary" ]; then
   exit 1
 fi
 chmod +x "$binary"
-"$binary" --version
+if [ "$target" = "linux-arm64-android" ]; then
+  # A Bionic binary cannot execute on the glibc build host; verify its
+  # ELF interpreter instead of running the smoke test.
+  readelf -l "$binary" | grep -Fq "interpreter: /system/bin/linker64" || {
+    echo "ERROR: $binary is not a Bionic (android) binary" >&2
+    exit 1
+  }
+  echo "android binary verified: ELF interpreter /system/bin/linker64"
+else
+  "$binary" --version
+fi
 
 baseline="$(jq -r .baseline_tag "$repo_root/upstream.json")"
 archive="openmux-$baseline-$target.tar.gz"

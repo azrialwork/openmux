@@ -7,3 +7,4 @@
 0003-remove-desktop-docs-sdk-and-other-envs.patch
 0004-remove-all-references-to-deleted-envs.patch
 0005-keep-only-opencode-free-models-and-custom-providers.patch
+0010-add-termux-bionic-native-build.patch
