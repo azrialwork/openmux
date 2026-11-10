@@ -36,7 +36,9 @@ from the musl OpenTUI library via a small Bionic compat shim;
 (0007) removes the self-update feature completely — the `upgrade`
 command, the background update checks, the TUI update dialog and
 banner, the installation events, and the `update`/`autoupdate`
-config settings.
+config settings; (0008) completes the earlier deletions — leftover
+pairing/acp tests and the orphaned Claude Agent SDK dependency
+removed.
 Per-patch detail, including the reasoning, is in `patches/README.md`.
 Patches 0006–0009 of the old numbering (system prompt, tool
 descriptions, agent prompts, delegation enforcement) were
@@ -60,6 +62,7 @@ patches/
   02-providers-and-models/  patch 0005
   03-termux-bionic/      patch 0006
   04-no-self-update/     patch 0007
+  05-deletion-cleanup/   patch 0008
 scripts/
   apply-patches.sh       clone baseline + apply the series
   build.sh               the one build entry point (all targets)
