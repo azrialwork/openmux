@@ -4,7 +4,7 @@
 # Patches are grouped by decision, one directory per logical change:
 #   01-cli-tui-only/         patches 0001-0004 (split for the 100 MB limit)
 #   02-providers-and-models/ patch 0005
-#   03-termux-bionic/        patch 0006
+#   03-termux-bionic/        patches 0006, 0009
 #   04-no-self-update/       patch 0007
 #   05-deletion-cleanup/     patch 0008
 # Numbering is dense and global: files are numbered 0001, 0002, ... in
@@ -18,3 +18,4 @@
 03-termux-bionic/0006-add-termux-bionic-native-build.patch
 04-no-self-update/0007-remove-the-self-update-feature.patch
 05-deletion-cleanup/0008-complete-the-total-deletion.patch
+03-termux-bionic/0009-enable-recursive-directory-watching-on-android.patch

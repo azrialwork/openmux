@@ -1,0 +1,237 @@
+From 18471b82119f717cf02bb43afc225257e2770927 Mon Sep 17 00:00:00 2001
+From: azrialwork <azrial.work@gmail.com>
+Date: Wed, 11 Nov 2026 00:46:13 +0700
+Subject: [PATCH] fix(cli): enable recursive directory watching on android
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+@parcel/watcher does publish an android-arm64 build — its inotify backend compiled for Bionic, already pinned as a dependency — but patch 0006 stubbed the binding out on the assumption that none exists, so every recursive directory watch (the config directories above all) ended unsupported on android and config changes inside them were only picked up after a restart.
+
+Embed the binding the way the OpenTUI assets are embedded: the CLI build stages @parcel/watcher-android-arm64's watcher.node into a prepared archive, startup extracts it to the cache and re-execs once with OPENCODE_PARCEL_WATCHER_PATH pointing at it, and the android binding loader requires that path. Core's watcher now also maps android to the inotify backend — getBackend() returned undefined for it, which alone marked the platform unsupported. The binding links the libc++_shared.so every Termux install ships, so no compat shim is needed.
+
+Verified on a Redmi Note 9 with the compiled android binary: directory watches start with backend inotify, and an agent file created under .opencode/agent/ appears in the running TUI without a restart.
+---
+ packages/cli/script/build.ts              | 57 +++++++++++++++++++++--
+ packages/cli/src/android-parcel.ts        | 44 +++++++++++++++++
+ packages/cli/src/index.ts                 |  7 +++
+ packages/cli/src/parcel-android-assets.ts |  6 +++
+ packages/core/src/filesystem/watcher.ts   |  3 +-
+ 5 files changed, 112 insertions(+), 5 deletions(-)
+ create mode 100644 packages/cli/src/android-parcel.ts
+ create mode 100644 packages/cli/src/parcel-android-assets.ts
+
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index b8d6baa..eb5b329 100755
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -3,7 +3,7 @@
+ import { $ } from "bun"
+ import { spawnSync } from "node:child_process"
+ import { createHash } from "node:crypto"
+-import { copyFile, cp, mkdir, readFile, rm } from "fs/promises"
++import { copyFile, cp, mkdir, readFile, rm, writeFile } from "fs/promises"
+ import { existsSync } from "node:fs"
+ import { createRequire } from "node:module"
+ import path from "path"
+@@ -12,6 +12,7 @@ import { embed } from "@opencode/script/highlights"
+ import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+ import type { BunPlugin } from "bun"
+ import pkg from "../package.json"
++import corePkg from "../../core/package.json"
+ import { discoverPluginRuntimeSpecifiers, pluginRuntimeLoaderCode } from "@opencode/plugin/runtime-modules"
+ import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
+ import { resolveOpencodePty } from "./opencode-pty"
+@@ -78,6 +79,10 @@ if (!skipInstall)
+ // prepared asset tree (musl render library + Bionic compat shim) instead. See
+ // prepareOpentuiAndroidAssets below.
+ const androidAssets = targets.some((item) => item.abi === "android") ? await prepareOpentuiAndroidAssets() : undefined
++// The android target embeds the @parcel/watcher android binding the same
++// way; a compiled binary cannot resolve the platform package at runtime.
++// See prepareParcelAndroidAssets below.
++const parcelAssets = targets.some((item) => item.abi === "android") ? await prepareParcelAndroidAssets() : undefined
+ const pluginRuntimeEntries = discoverPluginRuntimeSpecifiers()
+ const pluginRuntimeModulesSource = [
+   "export const resolveHostPackageRoots = () => []",
+@@ -156,16 +161,35 @@ export default { path: file, sha256: ${JSON.stringify(androidAssets.sha256)} }`
+       )
+     },
+   }
++  const parcelAndroidAssetsPlugin: BunPlugin = {
++    name: "parcel-android-assets",
++    setup(build) {
++      build.onLoad({ filter: /parcel-android-assets\.ts$/ }, () => ({
++        loader: "js",
++        contents:
++          item.abi === "android" && parcelAssets
++            ? `import file from ${JSON.stringify(parcelAssets.path)} with { type: "file" }\nexport default { path: file, sha256: ${JSON.stringify(parcelAssets.sha256)} }`
++            : "export default undefined",
++      }))
++    },
++  }
+   const parcelWatcherPackage = `@parcel/watcher-${item.os}-${item.arch}${item.os === "linux" ? `-${item.abi ?? "glibc"}` : ""}`
+   const parcelWatcherPlugin: BunPlugin = {
+     name: "parcel-watcher-binding",
+     setup(build) {
+       build.onLoad({ filter: /filesystem[/\\]watcher-binding\.ts$/ }, () => ({
+-        // @parcel/watcher publishes no android build; filesystem/watcher.ts
+-        // catches the throw and falls back to fs.watch.
++        // Android builds embed the @parcel/watcher android binding as a
++        // prepared asset instead (see prepareParcelAndroidAssets); startup
++        // extracts it and sets OPENCODE_PARCEL_WATCHER_PATH before any
++        // watch can subscribe (src/android-parcel.ts). Without the variable
++        // the load throws and filesystem/watcher.ts falls back to fs.watch.
+         contents:
+           item.abi === "android"
+-            ? `export default () => { throw new Error("@parcel/watcher has no android build") }`
++            ? `export default () => {
++                 const binding = process.env.OPENCODE_PARCEL_WATCHER_PATH
++                 if (!binding) throw new Error("OPENCODE_PARCEL_WATCHER_PATH is not set")
++                 return require(binding)
++               }`
+             : `export default () => require(${JSON.stringify(parcelWatcherPackage)})`,
+         loader: "js",
+       }))
+@@ -183,6 +207,7 @@ export default { path: file, sha256: ${JSON.stringify(androidAssets.sha256)} }`
+       parcelWatcherPlugin,
+       opencodePtyPlugin,
+       opentuiAndroidAssetsPlugin,
++      parcelAndroidAssetsPlugin,
+       pluginRuntimePlugin,
+       wsReexportPlugin,
+       simulationGraphPlugin,
+@@ -390,6 +415,30 @@ async function prepareOpentuiAndroidAssets() {
+   return { path: archive, sha256: createHash("sha256").update(await readFile(archive)).digest("hex") }
+ }
+ 
++// Prepares the @parcel/watcher binding embedded in android builds. The
++// watcher publishes an android-arm64 build (its inotify backend compiled
++// for Bionic; it links the libc++_shared.so every Termux install ships),
++// but a compiled binary has no node_modules to resolve it from, so the
++// binding is staged on its own and archived like the OpenTUI assets
++// above; src/android-parcel.ts extracts it at startup.
++async function prepareParcelAndroidAssets() {
++  const stage = path.join(outdir, ".android-parcel")
++  const tree = path.join(stage, "assets")
++  await rm(stage, { recursive: true, force: true })
++  await mkdir(tree, { recursive: true })
++  const install = path.join(stage, "install")
++  await mkdir(install, { recursive: true })
++  await writeFile(path.join(install, "package.json"), JSON.stringify({ name: "opencode-parcel-android", private: true }))
++  await $`bun install --cwd ${install} --os="android" --cpu="arm64" @parcel/watcher@${corePkg.dependencies["@parcel/watcher"]}`
++  const binding = path.join(install, "node_modules", "@parcel/watcher-android-arm64", "watcher.node")
++  if (!existsSync(binding))
++    throw new Error(`The android @parcel/watcher binding was not installed (expected at ${binding}).`)
++  await copyFile(binding, path.join(tree, "watcher.node"))
++  const archive = path.join(stage, "parcel-assets.tar")
++  run("tar", ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "--mtime=@0", "-cf", archive, "-C", tree, "."])
++  return { path: archive, sha256: createHash("sha256").update(await readFile(archive)).digest("hex") }
++}
++
+ async function bionicCompatLibrary(stage: string) {
+   const out = path.join(stage, "libopentui-android-compat.so")
+   const prebuilt = process.env.OPENCODE_BIONIC_SHIM
+diff --git a/packages/cli/src/android-parcel.ts b/packages/cli/src/android-parcel.ts
+new file mode 100644
+index 0000000..760cddd
+--- /dev/null
++++ b/packages/cli/src/android-parcel.ts
+@@ -0,0 +1,44 @@
++import { Path } from "@opencode/util/global"
++import { mkdir, rename, rm, writeFile } from "node:fs/promises"
++import path from "node:path"
++import assets from "./parcel-android-assets"
++
++// @parcel/watcher ships an android build, but a compiled binary cannot
++// resolve it as a package, so android builds of the CLI embed the binding
++// (watcher.node) instead — see prepareParcelAndroidAssets in
++// script/build.ts. Extract it once and hand the process a real file path:
++// the watcher binding loader reads OPENCODE_PARCEL_WATCHER_PATH when the
++// watcher is first used, and the background service must inherit the
++// variable from process start, so re-exec the CLI once with it set. The
++// re-exec'd process sees the variable set and proceeds normally.
++export async function ensureParcelWatcherPath() {
++  if (process.platform !== "android" || process.env.OPENCODE_PARCEL_WATCHER_PATH || !assets) return
++  const root = path.join(Path.cache, "parcel-assets", assets.sha256.slice(0, 16))
++  const binding = path.join(root, "watcher.node")
++  if (!(await Bun.file(path.join(root, ".complete")).exists())) {
++    const staging = `${root}.tmp-${process.pid}`
++    await rm(staging, { recursive: true, force: true })
++    await mkdir(staging, { recursive: true })
++    const archive = new Bun.Archive(await Bun.file(assets.path).arrayBuffer())
++    for (const [name, blob] of await archive.files()) {
++      const relative = name.replace(/^\.\//, "")
++      if (!relative || relative.endsWith("/")) continue
++      const destination = path.join(staging, relative)
++      if (!destination.startsWith(staging + path.sep)) continue
++      await mkdir(path.dirname(destination), { recursive: true })
++      await writeFile(destination, new Uint8Array(await blob.arrayBuffer()))
++    }
++    await writeFile(path.join(staging, ".complete"), "")
++    await rm(root, { recursive: true, force: true })
++    await rename(staging, root)
++  }
++  // In a compiled binary process.argv is ["bun", "/$bunfs/root/<entry>",
++  // ...user args]; the CLI's own arguments start at index 2.
++  const result = Bun.spawnSync([process.execPath, ...process.argv.slice(2)], {
++    env: { ...process.env, OPENCODE_PARCEL_WATCHER_PATH: binding },
++    stdin: "inherit",
++    stdout: "inherit",
++    stderr: "inherit",
++  })
++  process.exit(result.exitCode ?? 1)
++}
+diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
+index 0f73c5b..d9c335d 100755
+--- a/packages/cli/src/index.ts
++++ b/packages/cli/src/index.ts
+@@ -19,6 +19,7 @@ import { Heap } from "./heap"
+ import { CpuProfile } from "./cpu-profile"
+ import { ShutdownDeadline } from "./shutdown-deadline"
+ import { ensureOpentuiAssetRoot } from "./android-opentui"
++import { ensureParcelWatcherPath } from "./android-parcel"
+ 
+ // Keep requests to the local service off any proxy. Bun reads lowercase `no_proxy` alone whenever it is set, so both
+ // spellings get the same merged list.
+@@ -40,6 +41,12 @@ ensurePluginRuntime()
+ // elsewhere (and in the re-exec'd process, which inherits the variable).
+ await ensureOpentuiAssetRoot()
+ 
++// Android only: extract the embedded @parcel/watcher binding and re-exec
++// with OPENCODE_PARCEL_WATCHER_PATH set, before any command can subscribe
++// a directory watch. No-op elsewhere (and in the re-exec'd process, which
++// inherits the variable).
++await ensureParcelWatcherPath()
++
+ if (process.env.OPENCODE_SSH_ASKPASS_PORT) {
+   const { askpass } = await import("./ssh-askpass")
+   process.exit(await Effect.runPromise(askpass.pipe(Effect.provide(NodeServices.layer))))
+diff --git a/packages/cli/src/parcel-android-assets.ts b/packages/cli/src/parcel-android-assets.ts
+new file mode 100644
+index 0000000..958c954
+--- /dev/null
++++ b/packages/cli/src/parcel-android-assets.ts
+@@ -0,0 +1,6 @@
++// Replaced by the CLI build (script/build.ts): android builds export the
++// embedded @parcel/watcher android binding prepared for Bionic; every other
++// build — and source runs — exports undefined.
++const assets: { readonly path: string; readonly sha256: string } | undefined = undefined
++
++export default assets
+diff --git a/packages/core/src/filesystem/watcher.ts b/packages/core/src/filesystem/watcher.ts
+index 47c4bd2..de08c35 100644
+--- a/packages/core/src/filesystem/watcher.ts
++++ b/packages/core/src/filesystem/watcher.ts
+@@ -25,7 +25,8 @@ const watcher = lazy((): typeof ParcelWatcher | undefined => {
+ function getBackend() {
+   if (process.platform === "win32") return "windows"
+   if (process.platform === "darwin") return "fs-events"
+-  if (process.platform === "linux") return "inotify"
++  // The android build of @parcel/watcher is its inotify backend compiled for Bionic.
++  if (process.platform === "linux" || process.platform === "android") return "inotify"
+ }
+ 
+ export const hasNativeBinding = () => !!watcher()
+-- 
+2.43.0
+

@@ -40,7 +40,7 @@ On top of upstream v2.2.6, the series in `patches/series`:
 | --- | --- |
 | 0001–0004 (`01-cli-tui-only/`) | CLI and TUI only — every other environment (web GUI, desktop, docs site, SDK, hosted services) is deleted, references included |
 | 0005 (`02-providers-and-models/`) | Only the OpenCode Free Models (47) ship built in; everything else is a user-defined custom provider |
-| 0006 (`03-termux-bionic/`) | A native Android (Termux/Bionic) build target, TUI included |
+| 0006, 0009 (`03-termux-bionic/`) | A native Android (Termux/Bionic) build target, TUI included; recursive directory watching works there too — the real @parcel/watcher android build is embedded |
 | 0007 (`04-no-self-update/`) | The self-update feature is removed completely — no `upgrade` command, no background update checks, no update UI or config settings |
 | 0008 (`05-deletion-cleanup/`) | Completes the earlier deletions: leftover pairing/acp tests and the orphaned Claude Agent SDK dependency are removed |
 
